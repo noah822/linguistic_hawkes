@@ -27,6 +27,11 @@ class DiscreteKernel(Kernel):
                    distance_list: List) -> List[float]:
         pass
 
+    # determine whether a point to be considered is in region-of-interest
+    @abstractmethod
+    def in_roi(self, center, other) -> bool:
+        pass
+
 
 class DiscreteGaussianKernel(DiscreteKernel):
     def __init__(self,
@@ -37,21 +42,26 @@ class DiscreteGaussianKernel(DiscreteKernel):
         self.radius = radius
 
         self.weight_mapping = Gaussian(mu=mu, sigma=sigma)
+
+    def in_roi(self, center, other) -> bool:
+        return abs(center-other) < 2 * self.radius
     
     def estimate(self, center: int, interval: List[Any]) -> float:
         np_interval = np.array(interval)
 
-        dummy = np.array([center for _ in range(len(interval))])
-        normed_dist = (np.array(range(len(interval))) - dummy) / self.radius
+        dummy = np.array([interval[center] for _ in range(len(interval))])
+        normed_dist = (dummy - np_interval) / self.radius
         w = self.get_weight(normed_dist)
 
-        return sum(w * np_interval)
+        return sum(w * np_interval) / sum(w)
+    
 
     def get_weight(self, distance_list: List) -> List[float]:
         return self.weight_mapping(distance_list)
 
 
 import copy
+from ._internal import two_way_bisect
 def coarse_grain_series(
     series: List, 
     interval: int,
@@ -77,9 +87,7 @@ def coarse_grain_series(
 
 
 def pdf_kernel_estimate(X: List,
-                        kernel: DiscreteKernel=None,
-                        max_bandwidth: int=10,
-                        normalize=True) -> np.ndarray:
+                        kernel: DiscreteKernel) -> np.ndarray:
     '''
     approximate histgram using kernel to sliding through the 
     entire region of insterest
@@ -93,47 +101,18 @@ def pdf_kernel_estimate(X: List,
 
     # 1000
 
-    # by default, boundary size if half of bandwidth size
-    boundary_size = int(max_bandwidth / 2)
-    half_bd = int(max_bandwidth / 2)
-
-    if kernel is None:
-        kernel = DiscreteGaussianKernel(
-            radius=half_bd / 3,
-            mu=0.,
-            sigma=1.
-        )
-
     region_size = len(X)
     for i in range(region_size):
-        if _in_boundary_region(i, boundary_size, region_size):
-            if i < boundary_size: # left boundary
-                interval = X[:boundary_size]
-                focus = i
-            else: # right boundary
-                interval = X[-boundary_size:]
-                focus = i - (region_size - boundary_size)
-            
-        else: # not in boundary region
-            interval = X[i-half_bd:i+half_bd]
-            focus = half_bd
+        lvalue, rvalue = two_way_bisect(X, i, kernel.in_roi)
+        interval = X[lvalue:rvalue+1]
+        focus = i - lvalue
         
         smoothed_estimate.append(
             kernel.estimate(focus, interval)
         )
     
     smoothed_estimate = np.array(smoothed_estimate)
-    if normalize:
-        smoothed_estimate = smoothed_estimate / sum(smoothed_estimate)
-        print(sum(smoothed_estimate))
     return smoothed_estimate
-
-def _in_boundary_region(i, boundary_size, size) -> bool:
-    if i < boundary_size or i > (size - boundary_size):
-        return True
-    else:
-        return False
-
 
 
 
