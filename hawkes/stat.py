@@ -33,6 +33,32 @@ class DiscreteKernel(Kernel):
         pass
 
 
+class GaussianKernel(Kernel):
+    def __init__(self,
+                 radius,
+                 mu=0.,
+                 sigma=1.):
+        super(GaussianKernel, self).__init__()
+        self.radius = radius
+
+        self.weight_mapping = Gaussian(mu=mu, sigma=sigma)
+
+    def in_roi(self, center, other) -> bool:
+        return abs(center-other) < 2 * self.radius
+    
+    def estimate(self, center: int, interval: List[Any]) -> float:
+        np_interval = np.array(interval)
+
+        dummy = np.array([interval[center] for _ in range(len(interval))])
+        normed_dist = (dummy - np_interval) / self.radius
+        w = self.get_weight(normed_dist)
+
+        return sum(w * np_interval) / sum(w)
+    
+
+    def get_weight(self, distance_list: List) -> List[float]:
+        return self.weight_mapping(distance_list)
+
 class DiscreteGaussianKernel(DiscreteKernel):
     def __init__(self,
                  radius,
@@ -47,9 +73,9 @@ class DiscreteGaussianKernel(DiscreteKernel):
         return abs(center-other) < 2 * self.radius
     
     def estimate(self, center: int, interval: List[Any]) -> float:
-        np_interval = np.array(interval)
+        np_interval = np.array(range(len(interval)))
 
-        dummy = np.array([interval[center] for _ in range(len(interval))])
+        dummy = np.array([center for _ in range(len(interval))])
         normed_dist = (dummy - np_interval) / self.radius
         w = self.get_weight(normed_dist)
 
@@ -96,16 +122,21 @@ def pdf_kernel_estimate(X: List,
     sum of the bar value equals to 1
     '''
     smoothed_estimate = []
+    num_sample = len(X)
 
     # TODO bandwith annealing to the max value, then decrease again
 
     # 1000
+    radius = int(kernel.bandwidth / 2)
 
     region_size = len(X)
     for i in range(region_size):
-        lvalue, rvalue = two_way_bisect(X, i, kernel.in_roi)
-        interval = X[lvalue:rvalue+1]
-        focus = i - lvalue
+        # lvalue, rvalue = two_way_bisect(X, i, kernel.in_roi)
+        l = 0 if i < radius else (i - radius)
+        r = num_sample-1 if i > num_sample-1-radius else (i + radius)
+
+        interval = X[l:r+1]
+        focus = i - l
         
         smoothed_estimate.append(
             kernel.estimate(focus, interval)

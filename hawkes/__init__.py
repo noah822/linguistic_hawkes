@@ -1,1 +1,1 @@
-from .fit import Hawkes
+from .fit import DiscreteHawkes
