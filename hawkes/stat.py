@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from typing import List, Any, Union, Iterable
 import numpy as np
 
+from ._internal import normalize as normalizer
+
 from .dist import Gaussian
 
 
@@ -171,6 +173,42 @@ class SlideWindow(ABC):
             print(window)
             res.append(self.operate(window))
         return res
+    
+
+from sklearn.neighbors import KernelDensity
+# we only use gaussian kernel here, provided by sklearn package
+def get_bounded_pdf_estimator(
+    X: np.ndarray,
+    l: Union[float, int],
+    r: Union[float, int],
+    bandwidth: float,
+    normalize: bool=True
+):  
+    assert len(X.shape) == 1
+    X = X.reshape(-1, 1)
+    kernel_type = 'gaussian'
+    # flip X around boundary axis, specified by l and r value
+    left_flipped = 2*l - X[::-1]
+    right_flipped = 2*r - X[::-1]
+    augmented_X = np.concatenate(
+        [left_flipped, X, right_flipped],
+        axis=0
+    )
+
+    # use sklearn kernel density Gaussian estimator
+    kde = KernelDensity(kernel=kernel_type, bandwidth=bandwidth).fit(augmented_X)
+    
+    def hooked_kde(x: np.ndarray):
+        if len(x.shape) == 1:
+            x = x.reshape(-1, 1)
+        prob = np.exp(kde.score_samples(x))
+        if normalize:
+            prob = normalizer(prob)
+        return prob
+    
+    return hooked_kde
+
+
 
 
 
