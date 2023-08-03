@@ -86,3 +86,19 @@ def indep_roll(arr, shifts, axis=1):
     result = arr[tuple(all_idcs)]
     arr = np.swapaxes(result,-1,axis)
     return arr
+
+def pairwise_difference(X: np.ndarray):
+    num_sample = len(X)
+    diff = np.repeat(X[None,:], repeats=num_sample, axis=0) - X[:,None]
+    return diff[np.triu_indices(num_sample, k=1)]
+
+def diagonal_wise_sum(X, k=0, upper=True):
+    row, col = X.shape
+    assert row == col
+    masked = None
+    if upper:
+        masked = np.triu(X)
+    else:
+        masked = np.tril(X)
+    rotated_x = indep_roll(masked, shifts=row-np.arange(row))
+    return np.sum(rotated_x[:,k:], axis=0)

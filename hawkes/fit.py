@@ -1,29 +1,34 @@
 from sklearn.neighbors import KernelDensity
 from ._internal import (
-    two_way_bisect,
     normalize,
     get_end_point_mask,
-    indep_roll
+    indep_roll,
+    pairwise_difference,
+    diagonal_wise_sum
 )
 import numpy as np
 
 from typing import Callable
+from .stat import get_bounded_pdf_estimator
+from copy import deepcopy
 
 
 class DiscreteHawkes:
     def __init__(self,
                  bandwidth: float,
-                 delta: float,
                  init_mu0: float=None,
                  init_A: float=None,
+                 eps: float=1e-8,
                  mle_iter_round: int=20,
                  lambda_bar: float=0.999):
         self.bandwidth = bandwidth
 
         self._radius = int((self.bandwidth-1) / 2)
-        self.delta = delta
 
         self.init_mu0, self.init_A = init_mu0, init_A
+
+        # for numerical stability which doing division
+        self.eps = eps 
 
         assert 0 < lambda_bar < 1
         self.lambda_bar = lambda_bar
@@ -87,6 +92,25 @@ class DiscreteHawkes:
 
         # lambda_t = X
 
+        num_sample = X.shape[0]
+        region = np.arange(num_sample)
+        occurence = np.argwhere(X == 1).reshape(-1)
+
+        occur_lag = pairwise_difference(occurence)
+
+        # when updating mu(t) & g(t), use smoothed kernel estimate
+        lambda_kde = get_bounded_pdf_estimator(
+            occurence, 0, num_sample-1,
+            self.bandwidth
+        )
+        smoothed_lambda = lambda_kde(region)
+
+        lag_kde = get_bounded_pdf_estimator(
+            occur_lag, 0, num_sample-1,
+            self.bandwidth
+        )
+        smoothed_lag = lag_kde(region)
+
         mu0, A, mu_t, g_t = self.init_params(X, self.init_mu0, self.init_A)
         if verbose:
             print('[Init]')
@@ -96,6 +120,7 @@ class DiscreteHawkes:
                 print(f'[Epoch {idx}]')
             mu0, A, mu_t, g_t = self._fit_impl(
                 X, mu0, A, mu_t, g_t,
+                smoothed_lambda, smoothed_lag,
                 truncated,
                 verbose
             )
@@ -169,6 +194,8 @@ class DiscreteHawkes:
                   A: float, 
                   mu_: Callable,
                   g_: Callable,
+                  smoothed_lambda: np.ndarray,
+                  smoothed_lag: np.ndarray,
                   truncated: bool=True,
                   verbose: bool=False):
         # expression of lambda
@@ -183,7 +210,9 @@ class DiscreteHawkes:
         # -> estimate pho_t in explicit form 
 
         updated_mu, updated_g = self._E_step(
-            X, mu0, A, mu_, g_
+            X, mu0, A, mu_, g_,
+            smoothed_lambda,
+            smoothed_lag
         )
         # wrap mu, g into callable
 
@@ -206,27 +235,45 @@ class DiscreteHawkes:
                 mu0: float,
                 A: float, 
                 mu: np.ndarray,
-                g: np.ndarray):
+                g: np.ndarray,
+                smoothed_lambda: np.ndarray,
+                smoothed_lag: np.ndarray):
         num_sample = X.shape[0]
+        region = np.arange(num_sample)
+
+        # occurence = np.argwhere(X == 1).reshape(-1)
+
 
         _, eval_lambda = self._eval_fn_factory(X, mu0, A, mu, g, truncated=False)
         eval_g = self._g_factory(g)
 
         # g of size (num_sample, ), where sample=0..N-1
         # we assume that g(0) = 0
-        updated_mu = np.zeros_like(mu)
-        updated_g = np.zeros_like(g)
-        for idx in range(num_sample):
-            l = 0 if idx < self._radius else (idx - self._radius)
-            r = num_sample - 1 if idx > num_sample-1-self._radius else (idx + self._radius)
+        # mu^[k+1](t) <- mu^[k](t) / lambda^[k](t) * I[t \in small interval]
+        # the last term is smoothed out by kernel estimate
+        updated_mu = \
+            mu / (eval_lambda(region)+self.eps) * smoothed_lambda
 
-            interval = range(l, r+1)
+        # g^[k+1](t) <- rho^[k](ij) * I[ti-tj-t \in small interval]
+        # the last term is smoothed out by kernel estimate
+        
+        # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
+        g_ij = eval_g(
+            np.triu(
+                np.repeat(region[None,:], repeats=num_sample, axis=0) - region[:,None]
+            )
+        )
 
-            updated_mu[idx] = sum((mu[interval] / eval_lambda(interval)) * X[interval])
-            updated_g[idx] = sum((eval_g(interval) / eval_lambda(interval)) * X[interval]) + 1e-4
+        # one hack to compute some of each diag
+
+        lambda_i = eval_lambda(region)
+        updated_g = diagonal_wise_sum(g_ij / lambda_i, upper=True) * smoothed_lag
+
 
         updated_mu = normalize(updated_mu)
         updated_g = normalize(updated_g)
+        # force g(0) = g(1) = 0
+        updated_g[0] = updated_g[1] = 0
 
         return updated_mu, updated_g
     
