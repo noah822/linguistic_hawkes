@@ -14,10 +14,15 @@ class GridCanvas:
     
     
     def __iter__(self):
-        for row in range(self.num_row):
-            for col in range(self.num_col):
-                plot_color = self.color_spectrum[row * self.num_row + col]
-                yield _HookedSubplot(self.axs[row, col], plot_color)
+        if self.num_row != 1 and self.num_col != 1:
+            for row in range(self.num_row):
+                for col in range(self.num_col):
+                    plot_color = self.color_spectrum[row * self.num_row + col]
+                    yield _HookedSubplot(self.axs[row, col], plot_color)
+        else:
+            for i in range(self.num_row * self.num_col):
+                plot_color = self.color_spectrum[i]
+                yield _HookedSubplot(self.axs[i], plot_color)
         
 
     def legend(self):
