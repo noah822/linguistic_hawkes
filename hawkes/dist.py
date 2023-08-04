@@ -15,7 +15,7 @@ class Gaussian:
     def _pdf(self, x):
         coef = 1 / np.sqrt(2 * np.pi * self.sigma**2)
         return coef * np.exp(
-            - ((x-self.mu)**2 / 2*self.sigma**2)
+            - ((x-self.mu)**2 / (2*self.sigma**2))
         )
     
     def plot(self):

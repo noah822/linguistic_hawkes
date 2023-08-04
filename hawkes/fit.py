@@ -4,14 +4,17 @@ from ._internal import (
     get_end_point_mask,
     indep_roll,
     pairwise_difference,
-    diagonal_wise_sum
+    diagonal_wise_sum,
+    definite_integral,
+    columnwise_broadcast_div
 )
 import numpy as np
 
 from typing import Callable
 from .stat import get_bounded_pdf_estimator
+from .dist import Gaussian
 from copy import deepcopy
-
+import json
 
 class DiscreteHawkes:
     def __init__(self,
@@ -20,7 +23,8 @@ class DiscreteHawkes:
                  init_A: float=None,
                  eps: float=1e-8,
                  mle_iter_round: int=20,
-                 lambda_bar: float=0.999):
+                 lambda_bar: float=0.999,
+                 save_path: str=None):
         self.bandwidth = bandwidth
 
         self._radius = int((self.bandwidth-1) / 2)
@@ -34,6 +38,7 @@ class DiscreteHawkes:
         self.lambda_bar = lambda_bar
 
         self.mle_iter_round = mle_iter_round
+        self.save_path = save_path
 
     def init_params(self, X, mu0=None, A=None):
         # init parameters and un-parameterized distribution according to X
@@ -54,7 +59,7 @@ class DiscreteHawkes:
     def _g_initializer(size):
         # sample from expoential distribution
 
-        def exponential_dist(x, lambda_=0.001):
+        def exponential_dist(x, lambda_=0.1):
             return lambda_ * np.exp(x * -lambda_)
         
         init_g = exponential_dist(np.arange(size))
@@ -87,29 +92,35 @@ class DiscreteHawkes:
             epoch=5,
             truncated=True,
             verbose=True):
-        # lambda_pdf = KernelDensity('gaussian', self.bandwidth).fit(X)
-        # lambda_t = lambda_pdf.score_samples(X) # (#sample, )
-
-        # lambda_t = X
 
         num_sample = X.shape[0]
-        region = np.arange(num_sample)
         occurence = np.argwhere(X == 1).reshape(-1)
 
         occur_lag = pairwise_difference(occurence)
 
-        # when updating mu(t) & g(t), use smoothed kernel estimate
-        lambda_kde = get_bounded_pdf_estimator(
-            occurence, 0, num_sample-1,
-            self.bandwidth
-        )
-        smoothed_lambda = lambda_kde(region)
+        # integrate out kernel estimation for each obversation in the region of interest
+        smooth_lambda_normalizer = []
+        for i in occurence:
+            kernel_estimator = Gaussian(mu=i, sigma=self.bandwidth)
+            smooth_lambda_normalizer.append(
+                definite_integral(kernel_estimator, 0, num_sample-1)
+            )
+        smooth_lambda_normalizer = np.array(smooth_lambda_normalizer)
+        if verbose:
+            print('Integration over lambda finishes')
 
-        lag_kde = get_bounded_pdf_estimator(
-            occur_lag, 0, num_sample-1,
-            self.bandwidth
-        )
-        smoothed_lag = lag_kde(region)
+        smooth_lag_normalizer = []
+        for delta in occur_lag:
+            kernel_estimator = Gaussian(mu=delta, sigma=self.bandwidth)
+
+            smooth_lag_normalizer.append(
+                definite_integral(
+                    kernel_estimator, 0, num_sample-1
+                )
+            )
+        smooth_lag_normalizer = np.array(smooth_lag_normalizer)
+        print('Integration over ∆t finishes')
+
 
         mu0, A, mu_t, g_t = self.init_params(X, self.init_mu0, self.init_A)
         if verbose:
@@ -120,10 +131,21 @@ class DiscreteHawkes:
                 print(f'[Epoch {idx}]')
             mu0, A, mu_t, g_t = self._fit_impl(
                 X, mu0, A, mu_t, g_t,
-                smoothed_lambda, smoothed_lag,
+                smooth_lambda_normalizer,
+                smooth_lag_normalizer,
                 truncated,
                 verbose
             )
+        
+        # save progress
+        if self.save_path is not None:
+            with open(self.save_path, 'w') as handler:
+                json.dump({
+                    'mu0' : mu0,
+                    'A' : A,
+                    'mu_t' : list(mu_t.astype(np.float64)),
+                    'g_t' : list(g_t.astype(np.float64))
+                }, handler)
 
         return mu0, A, mu_t, g_t
     
@@ -188,14 +210,25 @@ class DiscreteHawkes:
             return mu0 * mu[x] / _lambda(x)
         return _phi, _lambda
     
+    def pairwise_kernel_est(self, num_sample, occurence):
+        # current impl using Gaussian kernel
+        stacked_occur = np.repeat(occurence[None,:], repeats=num_sample, axis=0) # (sample, occur)
+        est = 1 / (np.sqrt(2*np.pi) * self.bandwidth) \
+            * np.exp(
+            (-(stacked_occur-np.arange(num_sample)[:,None]) ** 2 / (2 * self.bandwidth**2))
+        )
+        return est
+
+
+    
     def _fit_impl(self,
                   X: float,
                   mu0: float,
                   A: float, 
                   mu_: Callable,
                   g_: Callable,
-                  smoothed_lambda: np.ndarray,
-                  smoothed_lag: np.ndarray,
+                  smooth_lambda_normalizer: np.ndarray,
+                  smooth_lag_normalizer: np.ndarray,
                   truncated: bool=True,
                   verbose: bool=False):
         # expression of lambda
@@ -211,8 +244,8 @@ class DiscreteHawkes:
 
         updated_mu, updated_g = self._E_step(
             X, mu0, A, mu_, g_,
-            smoothed_lambda,
-            smoothed_lag
+            smooth_lambda_normalizer,
+            smooth_lag_normalizer
         )
         # wrap mu, g into callable
 
@@ -236,44 +269,54 @@ class DiscreteHawkes:
                 A: float, 
                 mu: np.ndarray,
                 g: np.ndarray,
-                smoothed_lambda: np.ndarray,
-                smoothed_lag: np.ndarray):
+                smooth_lambda_normalizer: np.ndarray,
+                smooth_lag_normalizer: np.ndarray):
+        occurence = np.argwhere(X == 1).reshape(-1)
+        occur_lag = pairwise_difference(occurence) # 1-d array
+
         num_sample = X.shape[0]
-        region = np.arange(num_sample)
-
-        # occurence = np.argwhere(X == 1).reshape(-1)
-
 
         _, eval_lambda = self._eval_fn_factory(X, mu0, A, mu, g, truncated=False)
         eval_g = self._g_factory(g)
+        eval_mu = self._mu_factory(mu)
 
-        # g of size (num_sample, ), where sample=0..N-1
-        # we assume that g(0) = 0
-        # mu^[k+1](t) <- mu^[k](t) / lambda^[k](t) * I[t \in small interval]
-        # the last term is smoothed out by kernel estimate
-        updated_mu = \
-            mu / (eval_lambda(region)+self.eps) * smoothed_lambda
-
-        # g^[k+1](t) <- rho^[k](ij) * I[ti-tj-t \in small interval]
-        # the last term is smoothed out by kernel estimate
+        # compute kernel estimate at a given time stamp for all
+        # observation on-the-fly
         
-        # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
-        g_ij = eval_g(
-            np.triu(
-                np.repeat(region[None,:], repeats=num_sample, axis=0) - region[:,None]
-            )
+        Z_lambda = self.pairwise_kernel_est(num_sample, occurence)
+        updated_mu = np.sum(
+            eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
+            axis=-1
         )
 
-        # one hack to compute some of each diag
+        # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
+        Z_g = self.pairwise_kernel_est(num_sample, occur_lag)
+        num_occur = len(occurence)
 
-        lambda_i = eval_lambda(region)
-        updated_g = diagonal_wise_sum(g_ij / lambda_i, upper=True) * smoothed_lag
+        flattened_occur = np.repeat(occurence[None,:], repeats=num_occur, axis=0)[np.triu_indices(num_occur, k=1)]
+        rho_ij = eval_g(occur_lag) / eval_lambda(flattened_occur)
 
+        # t_i < T - t
+
+        # for a given lag, we count the number of valid occurence
+        # (pair_cnt, )
+        valid_occur_count = np.sum(
+            np.repeat(occurence[None,:], repeats=num_sample, axis=0) \
+          < (num_sample - np.arange(num_sample)[:,None]),
+            axis=-1
+        )
+
+        updated_g = np.sum(
+            rho_ij * Z_g / smooth_lag_normalizer,
+            axis=-1
+        ) / (valid_occur_count + self.eps)
 
         updated_mu = normalize(updated_mu)
-        updated_g = normalize(updated_g)
+
         # force g(0) = g(1) = 0
-        updated_g[0] = updated_g[1] = 0
+
+        # updated_g[0] = updated_g[1] = 0
+        updated_g = normalize(updated_g)
 
         return updated_mu, updated_g
     

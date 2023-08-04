@@ -102,3 +102,13 @@ def diagonal_wise_sum(X, k=0, upper=True):
         masked = np.tril(X)
     rotated_x = indep_roll(masked, shifts=row-np.arange(row))
     return np.sum(rotated_x[:,k:], axis=0)
+
+
+import scipy
+def definite_integral(f: Callable, l: float, r: float):
+    res, _ = scipy.integrate.quad(f, l, r)
+    return res
+
+
+def columnwise_broadcast_div(x, a):
+    return (x.T / a[:None]).T
