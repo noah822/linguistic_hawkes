@@ -53,3 +53,71 @@ class _HookedSubplot:
             return wrapper
         else:
             return method
+        
+import matplotlib.animation as animation
+import os
+
+class GifConverter:
+    def __init__(self,
+                 interval: int=800,
+                 repeat_delay: int=1000):
+        self.frame_queue = []
+        self._fig, self._axs = plt.subplots()
+
+        self._frame_cnt = 0
+        self.interval, self.repeat_delay = interval, repeat_delay
+
+        self._line, = self._axs.plot([], [])
+        self._title_display = self._axs.text(
+                0.5, 1.01,
+                '',
+                horizontalalignment='center',
+                verticalalignment='bottom',
+                transform=self._axs.transAxes
+            )  # persisted text pox
+
+
+        
+
+    def push(self, x, y, title=None):
+        # push next frame into queue
+        # currently only support plt.plot
+        self.frame_queue.append((x, y, title))
+    
+    def func_painter_wrap(self, frame_idx):
+        x, y, title = self.frame_queue[frame_idx]
+
+
+        self._line.set_data(x, y)
+        self._axs.relim()  # recompute x, y limits according to current artist
+        self._axs.autoscale_view()
+
+        if title is not None:
+            self._title_display.set_text(title)
+
+        return [self._line, self._title_display]
+        
+
+    def display(self):
+        ani = animation.FuncAnimation(
+            self._fig,
+            func=self.func_painter_wrap,
+            frames=len(self.frame_queue),
+            interval=self.interval,
+            repeat_delay=self.repeat_delay
+        )
+        plt.show()
+    
+    def save(self,
+             path: str,
+             save_fps: int=None):
+        anim = animation.FuncAnimation(
+            self._fig,
+            func=self.func_painter_wrap,
+            frames=len(self.frame_queue),
+            interval=self.interval,
+            repeat_delay=self.repeat_delay
+        )
+        save_fps = int(1000 / self.interval) if save_fps is None else save_fps
+        writervideo = animation.FFMpegWriter(save_fps)
+        anim.save(path, writer=writervideo)
