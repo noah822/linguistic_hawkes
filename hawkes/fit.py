@@ -1,4 +1,11 @@
+import json
+import numpy as np
+import os
+from typing import Callable
+
 from sklearn.neighbors import KernelDensity
+import matplotlib.pyplot as plt
+
 from ._internal import (
     normalize,
     get_end_point_mask,
@@ -8,30 +15,30 @@ from ._internal import (
     definite_integral,
     columnwise_broadcast_div
 )
-import numpy as np
-
-from typing import Callable
 from .stat import get_bounded_pdf_estimator
 from .dist import Gaussian
-from copy import deepcopy
-import json
+from utils.visual import GifConverter
+
 
 class DiscreteHawkes:
     def __init__(self,
                  bandwidth: float,
                  init_mu0: float=None,
                  init_A: float=None,
+                 init_exp_lambda: float=None,
                  eps: float=1e-8,
                  mle_iter_round: int=20,
                  lambda_bar: float=0.999,
+                 save_as_gif_path: str=None,
                  save_path: str=None):
         self.bandwidth = bandwidth
 
         self._radius = int((self.bandwidth-1) / 2)
 
         self.init_mu0, self.init_A = init_mu0, init_A
+        self.init_exp_lambda = init_exp_lambda
 
-        # for numerical stability which doing division
+        # for numerical stability when doing division
         self.eps = eps 
 
         assert 0 < lambda_bar < 1
@@ -40,32 +47,40 @@ class DiscreteHawkes:
         self.mle_iter_round = mle_iter_round
         self.save_path = save_path
 
-    def init_params(self, X, mu0=None, A=None):
+        self._save_progress = save_as_gif_path is not None
+        if self._save_progress:
+            # initialize frame holder for each trackable varibale
+            self.gif_converter_dict = {
+                'mu_t' : GifConverter(),
+                'g_t' : GifConverter()
+            }
+        self.save_as_gif_path = save_as_gif_path
+
+    def init_params(self, X, mu0=None, A=None, init_exp_lambda=None):
         # init parameters and un-parameterized distribution according to X
         num_sample = X.shape[0]
         mu0 = 1. if mu0 is None else mu0
         A = 1. if A is None else A
+        init_exp_lambda = 0.02 if init_exp_lambda is None else init_exp_lambda
 
         default_bg_ratio = 0.6
         mu_t = default_bg_ratio * np.array([np.mean(X, axis=0) for _ in range(num_sample)])
-        mu_t = normalize(mu_t)
+        mu_t = normalize(mu_t, divide_by_mean=True)
 
-        g_t = DiscreteHawkes._g_initializer(num_sample)
+        g_t = DiscreteHawkes._g_initializer(num_sample, init_exp_lambda)
         g_t = normalize(g_t)
 
         return mu0, A, mu_t, g_t
     
     @staticmethod
-    def _g_initializer(size):
+    def _g_initializer(size, init_exp_lambda):
         # sample from expoential distribution
 
-        def exponential_dist(x, lambda_=0.1):
+        def exponential_dist(x, lambda_=init_exp_lambda):
             return lambda_ * np.exp(x * -lambda_)
         
         init_g = exponential_dist(np.arange(size))
         # by default, set self & adjacent triggering effect to 0
-        init_g[0] = .0
-        init_g[1] = .0
         return init_g
     
 
@@ -129,6 +144,18 @@ class DiscreteHawkes:
         for idx in range(epoch):
             if verbose:
                 print(f'[Epoch {idx}]')
+            
+            if self._save_progress:
+                # record the evolution of mu_t and g_t as mp4
+                self.gif_converter_dict['mu_t'].push(
+                    range(num_sample), mu_t,
+                    f'Epoch {idx}'
+                )
+                self.gif_converter_dict['g_t'].push(
+                    range(num_sample), g_t, 
+                    f'Epoch {idx}'
+                )
+            
             mu0, A, mu_t, g_t = self._fit_impl(
                 X, mu0, A, mu_t, g_t,
                 smooth_lambda_normalizer,
@@ -137,7 +164,7 @@ class DiscreteHawkes:
                 verbose
             )
         
-        # save progress
+        # save fitted parameters
         if self.save_path is not None:
             with open(self.save_path, 'w') as handler:
                 json.dump({
@@ -146,6 +173,16 @@ class DiscreteHawkes:
                     'mu_t' : list(mu_t.astype(np.float64)),
                     'g_t' : list(g_t.astype(np.float64))
                 }, handler)
+        
+        # save progress as mp4
+        if self._save_progress:
+            if not os.path.isdir(self.save_as_gif_path):
+                os.makedirs(self.save_as_gif_path, exist_ok=False)
+            for param_name, gif in self.gif_converter_dict.items():
+                gif.save(
+                    os.path.join(self.save_as_gif_path, f'{param_name}.mp4'),
+                    save_fps=2
+                )
 
         return mu0, A, mu_t, g_t
     
@@ -300,18 +337,19 @@ class DiscreteHawkes:
 
         # for a given lag, we count the number of valid occurence
         # (pair_cnt, )
-        valid_occur_count = np.sum(
-            np.repeat(occurence[None,:], repeats=num_sample, axis=0) \
-          < (num_sample - np.arange(num_sample)[:,None]),
-            axis=-1
-        )
+
+
+        # valid_occur_count = np.sum(
+        #     np.repeat(occurence[None,:], repeats=num_sample, axis=0) \
+        #   < (num_sample - np.arange(num_sample)[:,None]),
+        #     axis=-1
+        # )
 
         updated_g = np.sum(
             rho_ij * Z_g / smooth_lag_normalizer,
             axis=-1
-        ) / (valid_occur_count + self.eps)
-
-        updated_mu = normalize(updated_mu)
+        )
+        updated_mu = normalize(updated_mu, divide_by_mean=True)
 
         # force g(0) = g(1) = 0
 

@@ -49,8 +49,11 @@ def _right_bisect(X, l, r, key):
     return l
 
 import numpy as np
-def normalize(t: np.ndarray):
-    return t / sum(t)
+def normalize(t: np.ndarray, divide_by_mean: bool=False):
+    if divide_by_mean:
+        return t / t.mean()
+    else:
+        return t / sum(t)
 
 def get_end_point_mask(
                 end_points: np.ndarray,
