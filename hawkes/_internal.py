@@ -5,6 +5,7 @@ from typing import (
     List,
     Union
 )
+import dask.array as da
 
 def two_way_bisect(X: List,
                    center: int,
@@ -64,6 +65,16 @@ def get_end_point_mask(
     mask = key(mask, end_points[:,None])
     return mask
 
+def get_end_point_mask_da(
+    end_points,
+    N: int
+):
+    num_query = end_points.shape[0]
+    mask = da.repeat(da.arange(N)[None,:], repeats=num_query, axis=0)
+    mask = mask < end_points[:, None]
+    return mask
+    
+
 
 def indep_roll(arr, shifts, axis=1):
     """Apply an independent roll for each dimensions of a single axis.
@@ -89,6 +100,35 @@ def indep_roll(arr, shifts, axis=1):
     result = arr[tuple(all_idcs)]
     arr = np.swapaxes(result,-1,axis)
     return arr
+
+def indep_2d_roll_da(
+        arr,
+        shifts: np.ndarray):
+    # independent rolling equivalent for dask array
+    # specifically impl for 2-D dask array
+
+    # chunk size of arr should be configured properly
+    # with chunks=(1, col_num)
+
+    # secure type of shifts array
+    if not isinstance(shifts, np.ndarray):
+        shifts = np.array(shifts)
+
+
+    _, col = arr.shape
+    shifts[shifts < 0] += col
+
+    def _roll_single_row(row: np.ndarray, block_id=None):
+        idx, _ = block_id
+        return np.roll(row, shift=shifts[idx])
+
+    res = da.map_blocks(
+        _roll_single_row, arr,
+        dtype=arr.dtype
+    )
+
+    return res
+
 
 def pairwise_difference(X: np.ndarray):
     num_sample = len(X)
