@@ -154,13 +154,12 @@ class DiscreteHawkes:
         for delta in occur_lag:
             kernel_estimator = Gaussian(mu=delta, sigma=self.bandwidth)
 
-            smooth_lag_normalizer.append(1.)
-
-            # smooth_lag_normalizer.append(
-            #     definite_integral(
-            #         kernel_estimator, 0, num_sample-1
-            #     )
-            # )
+            # smooth_lag_normalizer.append(1.)
+            smooth_lag_normalizer.append(
+                definite_integral(
+                    kernel_estimator, 0, num_sample-1
+                )
+            )
         smooth_lag_normalizer = np.array(smooth_lag_normalizer)
         print('Integration over ∆t finishes')
 
@@ -179,10 +178,31 @@ class DiscreteHawkes:
         if verbose:
             print('[Init]')
             print('mu0: {:.2f}\tA: {:.2f}'.format(mu0, A))
+
+        if self._save_progress:
+            # log init condition
+            self.gif_converter_dict['mu_t'].push(
+                range(num_sample), mu_t,
+                'Init'
+            )
+            self.gif_converter_dict['g_t'].push(
+                range(num_sample), g_t, 
+                'Init'
+            )
+        
         for idx in range(epoch):
             if verbose:
                 print(f'[Epoch {idx}]')
             
+            
+            mu0, A, mu_t, g_t = self._fit_impl(
+                X, mu0, A, mu_t, g_t,
+                smooth_lambda_normalizer,
+                smooth_lag_normalizer,
+                truncated,
+                verbose
+            )
+
             if self._save_progress:
                 # record the evolution of mu_t and g_t as mp4
                 self.gif_converter_dict['mu_t'].push(
@@ -193,14 +213,6 @@ class DiscreteHawkes:
                     range(num_sample), g_t, 
                     f'Epoch {idx}'
                 )
-            
-            mu0, A, mu_t, g_t = self._fit_impl(
-                X, mu0, A, mu_t, g_t,
-                smooth_lambda_normalizer,
-                smooth_lag_normalizer,
-                truncated,
-                verbose
-            )
         
         # save fitted parameters
         if self.save_path is not None:
@@ -240,7 +252,10 @@ class DiscreteHawkes:
         # g -> array of value at different lag time
         # @profile
         def g_lag(idx: np.ndarray) -> np.ndarray:
-            default_row_bundle_size = 2000
+            chunk_upper_lim = 20_000_000
+            row_bundle_size = int(
+                chunk_upper_lim / num_sample
+            )
 
             def _bundle_row_op(g_, X_, block_id=None):
             # for two aligned chunk (row), to compute g lag 
@@ -251,14 +266,14 @@ class DiscreteHawkes:
                 chunk_id = block_id[0]
                 cur_chunk_size = g_.shape[0]
 
-                l_bound = chunk_id * default_row_bundle_size
+                l_bound = chunk_id * row_bundle_size
                 r_bound = l_bound + cur_chunk_size
                 shifts = idx[l_bound:r_bound]
                 # updated this with independent roll
                 # to spead up computation 
                 # current testing with 200+ sample is OK
                 # rotated_g = np.roll(np.flip(g_), shift, axis=0)
-                rotated_g = indep_roll(g_, shifts)
+                rotated_g = indep_roll(np.flip(g_, axis=-1), shifts)
                 mask = get_end_point_mask(shifts, num_sample)
                 
                 return np.sum(X_ * rotated_g * mask, axis=-1)
@@ -270,20 +285,14 @@ class DiscreteHawkes:
             # everything should be wrapped into dask array
             num_query = idx.shape[0]
 
-            # buffer both X and g
-            DiscreteHawkes._buffer_stacked_arr(
+            stacked_X = DiscreteHawkes._stack_then_rechunk(
                 X, repeats=num_query,
-                bundle_size=default_row_bundle_size,
-                buffer_folder='.stacked_X'
+                chunks=(row_bundle_size, num_sample)
             )
-            DiscreteHawkes._buffer_stacked_arr(
+            stacked_g = DiscreteHawkes._stack_then_rechunk(
                 g, repeats=num_query,
-                bundle_size=default_row_bundle_size,
-                buffer_folder='.stacked_g'
+                chunks=(row_bundle_size, num_sample)
             )
-
-            stacked_X = da.from_npy_stack('.stacked_X')
-            stacked_g = da.from_npy_stack('.stacked_g')
 
             res = da.map_blocks(
                 _bundle_row_op, stacked_g, stacked_X, 
@@ -324,7 +333,6 @@ class DiscreteHawkes:
         # wrap mu, g into callable
         def _lambda(x):
             # x is idx 
-            tmp = g_lag(x)
             lambda_res = mu0 * mu[x] + A * g_lag(x) + 1e-8
             if truncated:
                 lambda_res[lambda_res >= 1] = self.lambda_bar
@@ -349,18 +357,18 @@ class DiscreteHawkes:
         col_size = len(occurence)
 
         # bundle serveral rows together to increase the chunk size 
-        DiscreteHawkes._buffer_stacked_arr(
-            occurence, 
-            repeats=num_sample,
-            bundle_size=int(chunk_upper_lim / col_size),
-            buffer_folder='.dask_buffer'
+        row_bundle_size = int(chunk_upper_lim / col_size)
+        stacked_occur = DiscreteHawkes._stack_then_rechunk(
+            occurence, num_sample,
+            chunks=(row_bundle_size, col_size, )
         )
-
-        stacked_occur = da.from_npy_stack('.dask_buffer')
 
         # rechunck this 
         def _row_wise_kernel_est(row: np.ndarray, block_id=None):
-            idx = block_id[0]
+            chunk_idx = block_id[0]
+            lbound = chunk_idx * row_bundle_size
+            rbound = lbound + row.shape[0]
+            idx = np.arange(lbound, rbound)[:,None]
             # compute elememt-wise gaussian on each row
             estimate = 1 / (np.sqrt(2*np.pi) * self.bandwidth) * np.exp(
                 -(row-idx)**2 / (2*self.bandwidth)
@@ -447,6 +455,7 @@ class DiscreteHawkes:
             eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
             axis=-1
         ).compute()
+        print('done with updating mu')
 
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
         Z_g = self.pairwise_kernel_est(num_sample, occur_lag)
@@ -459,6 +468,7 @@ class DiscreteHawkes:
             rho_ij * Z_g / smooth_lag_normalizer,
             axis=-1
         ).compute()
+        print('done with updating g')
         updated_mu = normalize(updated_mu, divide_by_mean=True)
 
         # force g(0) = g(1) = 0
@@ -554,6 +564,19 @@ class DiscreteHawkes:
         }
         with open(os.path.join(buffer_folder, 'info'), 'wb') as handler:
             pickle.dump(meta_info, handler)
+
+    @staticmethod
+    def _stack_then_rechunk(np_arr: np.ndarray,
+                            repeats: int, 
+                            chunks: Tuple):
+        # stack array at zero axis then rechunk it
+
+        # by default will take smallest chunk as the arr to be stacked itself
+        wrapped_arr = da.from_array(np_arr, chunks=(np_arr.shape))
+        stacked_arr = da.repeat(
+            wrapped_arr[None,:], repeats, axis=0
+        )
+        return stacked_arr.rechunk(chunks)
 
             
     
