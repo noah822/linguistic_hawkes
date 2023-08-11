@@ -154,12 +154,12 @@ class DiscreteHawkes:
         for delta in occur_lag:
             kernel_estimator = Gaussian(mu=delta, sigma=self.bandwidth)
 
-            # smooth_lag_normalizer.append(1.)
-            smooth_lag_normalizer.append(
-                definite_integral(
-                    kernel_estimator, 0, num_sample-1
-                )
-            )
+            smooth_lag_normalizer.append(1.)
+            # smooth_lag_normalizer.append(
+            #     definite_integral(
+            #         kernel_estimator, 0, num_sample-1
+            #     )
+            # )
         smooth_lag_normalizer = np.array(smooth_lag_normalizer)
         print('Integration over ∆t finishes')
 
@@ -371,7 +371,7 @@ class DiscreteHawkes:
             idx = np.arange(lbound, rbound)[:,None]
             # compute elememt-wise gaussian on each row
             estimate = 1 / (np.sqrt(2*np.pi) * self.bandwidth) * np.exp(
-                -(row-idx)**2 / (2*self.bandwidth)
+                -(row-idx)**2 / (2*self.bandwidth**2)
             )
             return estimate
         
