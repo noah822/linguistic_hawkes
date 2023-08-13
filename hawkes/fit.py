@@ -7,18 +7,15 @@ from typing import (
     Tuple
 )
 
-import dask
 import dask.array as da
-from dask.distributed import Client
 
+
+from ._jit_hotspot import bundled_g_compute
 from ._internal import (
     normalize,
-    get_end_point_mask,
     pairwise_difference,
-    indep_roll,
     definite_integral,
 )
-from .stat import get_bounded_pdf_estimator
 from .dist import Gaussian
 from utils.visual import GifConverter
 
@@ -154,12 +151,12 @@ class DiscreteHawkes:
         for delta in occur_lag:
             kernel_estimator = Gaussian(mu=delta, sigma=self.bandwidth)
 
-            smooth_lag_normalizer.append(1.)
-            # smooth_lag_normalizer.append(
-            #     definite_integral(
-            #         kernel_estimator, 0, num_sample-1
-            #     )
-            # )
+            # smooth_lag_normalizer.append(1.)
+            smooth_lag_normalizer.append(
+                definite_integral(
+                    kernel_estimator, 0, num_sample-1
+                )
+            )
         smooth_lag_normalizer = np.array(smooth_lag_normalizer)
         print('Integration over ∆t finishes')
 
@@ -269,14 +266,18 @@ class DiscreteHawkes:
                 l_bound = chunk_id * row_bundle_size
                 r_bound = l_bound + cur_chunk_size
                 shifts = idx[l_bound:r_bound]
+
+                return bundled_g_compute(g_, X_, shifts)
+
+
                 # updated this with independent roll
                 # to spead up computation 
                 # current testing with 200+ sample is OK
                 # rotated_g = np.roll(np.flip(g_), shift, axis=0)
-                rotated_g = indep_roll(np.flip(g_, axis=-1), shifts)
-                mask = get_end_point_mask(shifts, num_sample)
+                # rotated_g = indep_2d_roll(np.flip(g_, axis=-1), shifts)
+                # mask = get_end_point_mask(shifts, num_sample)
                 
-                return np.sum(X_ * rotated_g * mask, axis=-1)
+                # return np.sum(X_ * rotated_g * mask, axis=-1)
             
             if isinstance(idx, int):
                 raise ValueError('input should be an iterable')
@@ -455,7 +456,6 @@ class DiscreteHawkes:
             eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
             axis=-1
         ).compute()
-        print('done with updating mu')
 
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
         Z_g = self.pairwise_kernel_est(num_sample, occur_lag)
@@ -468,7 +468,6 @@ class DiscreteHawkes:
             rho_ij * Z_g / smooth_lag_normalizer,
             axis=-1
         ).compute()
-        print('done with updating g')
         updated_mu = normalize(updated_mu, divide_by_mean=True)
 
         # force g(0) = g(1) = 0

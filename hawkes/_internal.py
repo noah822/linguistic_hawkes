@@ -56,50 +56,7 @@ def normalize(t: np.ndarray, divide_by_mean: bool=False):
     else:
         return t / sum(t)
 
-def get_end_point_mask(
-                end_points: np.ndarray,
-                N: int,
-                key: Callable=lambda x, y: x < y):
-    num_query = end_points.shape[0]
-    mask = np.repeat(np.arange(N).reshape(1, -1), repeats=num_query, axis=0)
-    mask = key(mask, end_points[:,None])
-    return mask
 
-def get_end_point_mask_da(
-    end_points,
-    N: int
-):
-    num_query = end_points.shape[0]
-    mask = da.repeat(da.arange(N)[None,:], repeats=num_query, axis=0)
-    mask = mask < end_points[:, None]
-    return mask
-    
-
-
-def indep_roll(arr, shifts, axis=1):
-    """Apply an independent roll for each dimensions of a single axis.
-
-    Parameters
-    ----------
-    arr : np.ndarray
-        Array of any shape.
-
-    shifts : np.ndarray
-        How many shifting to use for each dimension. Shape: `(arr.shape[axis],)`.
-
-    axis : int
-        Axis along which elements are shifted. 
-    """
-    arr = np.swapaxes(arr,axis,-1)
-    all_idcs = np.ogrid[[slice(0,n) for n in arr.shape]]
-
-    # Convert to a positive shift
-    shifts[shifts < 0] += arr.shape[-1] 
-    all_idcs[-1] = all_idcs[-1] - shifts[:, np.newaxis]
-
-    result = arr[tuple(all_idcs)]
-    arr = np.swapaxes(result,-1,axis)
-    return arr
 
 def indep_2d_roll_da(
         arr,
@@ -134,18 +91,6 @@ def pairwise_difference(X: np.ndarray):
     num_sample = len(X)
     diff = np.repeat(X[None,:], repeats=num_sample, axis=0) - X[:,None]
     return diff[np.triu_indices(num_sample, k=1)]
-
-def diagonal_wise_sum(X, k=0, upper=True):
-    row, col = X.shape
-    assert row == col
-    masked = None
-    if upper:
-        masked = np.triu(X)
-    else:
-        masked = np.tril(X)
-    rotated_x = indep_roll(masked, shifts=row-np.arange(row))
-    return np.sum(rotated_x[:,k:], axis=0)
-
 
 import scipy
 def definite_integral(f: Callable, l: float, r: float):
