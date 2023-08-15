@@ -8,23 +8,24 @@ from typing import Callable
 def bundled_g_compute(
     g: np.ndarray,
     X: np.ndarray,
-    shifts: np.ndarray
+    query: np.ndarray
 ):
-    _, num_sample = X.shape
-    rotated_g = indep_2d_roll(np.fliplr(g), shifts)
+    # for two aligned chunk (row), to compute g lag 
+    # we need to do the following operation
+    # step 1: rotate row of g according to occurence time stamp
+    # step 2: element-wise multiply rotated g with X
+    # return sum of it 
+    num_sample = X.shape[0] # un-stacked X
+    num_query = query.shape[0]
+
+    shifts = query
+    stacked_X = np.repeat(X, num_query).reshape(-1, num_query).T
+    stacked_g = np.repeat(g, num_query).reshape(-1, num_query).T
+
+    rotated_g = indep_2d_roll(np.fliplr(stacked_g), query)
     # mask = np.repeat(np.arange(num_sample)[None, :], repeats=num_query, axis=0)
     mask = np.arange(num_sample)[None,:] < shifts[:,None]
-    return np.sum(X * rotated_g * mask, axis=-1)
-
-# @njit(nogil=True)
-# def get_end_point_mask(
-#                 end_points: np.ndarray,
-#                 N: int,
-#                 key: Callable=lambda x, y: x < y):
-#     num_query = end_points.shape[0]
-#     mask = np.repeat(np.arange(N).reshape(1, -1), repeats=num_query, axis=0)
-#     mask = key(mask, end_points[:,None])
-#     return mask
+    return np.sum(stacked_X * rotated_g * mask, axis=-1)
 
 @njit(nogil=True)
 def indep_2d_roll(arr, shifts):
