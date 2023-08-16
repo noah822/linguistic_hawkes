@@ -1,3 +1,4 @@
+import bisect
 import concurrent.futures 
 import json
 import numpy as np
@@ -11,7 +12,7 @@ from typing import (
 import dask.array as da
 
 
-from ._jit_hotspot import bundled_g_compute
+from ._jit_hotspot import bundled_g_lag_compute
 from ._internal import (
     normalize,
     pairwise_difference,
@@ -36,6 +37,7 @@ class DiscreteHawkes:
                  chunk_config: Dict=None,
                  use_file_buffer: bool=False,
                  num_internal_worker: int=None,
+                 g_truncate_bound: int=None,
                  save_as_gif_path: str=None,
                  serialize: bool=False,
                  save_path: str=None):
@@ -56,12 +58,6 @@ class DiscreteHawkes:
         self.save_path = save_path
 
         self._save_progress = save_as_gif_path is not None
-        if self._save_progress:
-            # initialize frame holder for each trackable varibale
-            self.gif_converter_dict = {
-                'mu_t' : GifConverter(),
-                'g_t' : GifConverter()
-            }
         self.save_as_gif_path = save_as_gif_path
 
         self.use_file_buffer = use_file_buffer
@@ -76,14 +72,20 @@ class DiscreteHawkes:
         self.num_internal_worker = num_internal_worker
 
         self.serialize = serialize
+
+        # if this option is turned on
+        # when updating g, value at time stamp larger then threshold `g_truncate_bound`
+        # will not be computed and default to self._xi 
+        self._optimized_compute = g_truncate_bound is not None
+        self._g_truncate_bound = g_truncate_bound
+        self._xi = 1e-150
     
     @property
     def chunk_config(self):
         _chunk_config = {
-            'X' : 10**7,
-            'occur' : 10**6,
-            'occur_lag' : 10**6,
-            'bundle': 200_000_000
+            'X' : 1000,
+            'kernel' : 1000,
+            'occur_lag' : 1000
         }
         if self._overriding_chunk_config is not None:
             assert all(
@@ -145,6 +147,12 @@ class DiscreteHawkes:
             epoch=5,
             truncated=True,
             verbose=True):
+        if self._save_progress:
+            # initialize frame holder for each trackable varibale
+            self.gif_converter_dict = {
+                'mu_t' : GifConverter(),
+                'g_t' : GifConverter()
+            }
 
         num_sample = X.shape[0]
         occurence = np.argwhere(X == 1).reshape(-1)
@@ -168,12 +176,6 @@ class DiscreteHawkes:
 
             smooth_lag_normalizer.append(1.)
 
-            # TODO: parallelize it
-            # smooth_lag_normalizer.append(
-            #     definite_integral(
-            #         kernel_estimator, 0, num_sample-1
-            #     )
-            # )
         smooth_lag_normalizer = np.array(smooth_lag_normalizer)
         print('Integration over ∆t finishes')
 
@@ -191,7 +193,7 @@ class DiscreteHawkes:
         mu0, A, mu_t, g_t = self.init_params(X, self.init_mu0, self.init_A)
         if verbose:
             print('[Init]')
-            print('mu0: {:.2f}\tA: {:.2f}'.format(mu0, A))
+            print('mu0: {:.7f}\tA: {:.7f}'.format(mu0, A))
 
         if self._save_progress:
             # log init condition
@@ -265,11 +267,20 @@ class DiscreteHawkes:
         def _atomic_g_lag(idx: np.ndarray) -> np.ndarray:
             # do not actually need to stack X statically, do it on-the-fly
             def _bundle_query_op(query):
-                return bundled_g_compute(g, X, query)
+                return bundled_g_lag_compute(
+                    g, X, query,
+                    window_size=self._g_truncate_bound
+                )
             
             if isinstance(idx, int):
                 raise ValueError('input should be an iterable')
             
+            if self._optimized_compute:
+                # truncate large g value
+                res_holder = np.ones_like(idx) * self._xi
+                roi_idx_bound = bisect.bisect_right(idx, self._g_truncate_bound)
+                idx = idx[:roi_idx_bound]
+                
             # everything should be wrapped into dask array
             wrapped_query = da.from_array(idx, chunks=(self.chunk_config['occur_lag'], ))
 
@@ -278,7 +289,11 @@ class DiscreteHawkes:
                 dtype='float64',
                 chunks=(self.chunk_config['occur_lag'], )
             )
-            return res.compute() # export numpy result
+            if self._optimized_compute:
+                res_holder[:roi_idx_bound] = res.compute()
+                return res_holder
+            else:
+                return res.compute() # export numpy result
     
         if self.serialize:
             # serialize g_lag query into multiple chunks to prevent OOM
@@ -339,7 +354,7 @@ class DiscreteHawkes:
         # current impl using Gaussian kernel
 
         # buffer stacked occurence array
-        wrapped_est = da.arange(num_sample, chunks=(self.chunk_config['X'], ))
+        wrapped_est = da.arange(num_sample, chunks=(self.chunk_config['kernel'], ))
         num_occur = occurence.shape[0]
         def _row_wise_kernel_est(row: np.ndarray):
             # compute elememt-wise gaussian on each row
@@ -351,7 +366,7 @@ class DiscreteHawkes:
         est = da.map_blocks(
             _row_wise_kernel_est,
             wrapped_est,
-            chunks=(self.chunk_config['X'], num_occur), 
+            chunks=(self.chunk_config['kernel'], num_occur), 
             new_axis=[1],
             dtype=np.float64)
         return est
@@ -396,7 +411,7 @@ class DiscreteHawkes:
         )
 
         if verbose:
-            print('mu0: {:.2f}\tA: {:.2f}'.format(updated_mu0, updated_A))
+            print('mu0: {:.7f}\tA: {:.7f}'.format(updated_mu0, updated_A))
 
         return updated_mu0, updated_A, updated_mu, updated_g
     
