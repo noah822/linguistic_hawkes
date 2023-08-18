@@ -12,7 +12,7 @@ from typing import (
 import dask.array as da
 
 
-from ._jit_hotspot import bundled_g_lag_compute
+from ._jit_hotspot import bundled_g_lag_compute, kernel_est_on_window
 from ._internal import (
     normalize,
     pairwise_difference,
@@ -38,6 +38,7 @@ class DiscreteHawkes:
                  use_file_buffer: bool=False,
                  num_internal_worker: int=None,
                  g_truncate_bound: int=None,
+                 kernel_window: int=None,
                  save_as_gif_path: str=None,
                  serialize: bool=False,
                  save_path: str=None):
@@ -76,9 +77,13 @@ class DiscreteHawkes:
         # if this option is turned on
         # when updating g, value at time stamp larger then threshold `g_truncate_bound`
         # will not be computed and default to self._xi 
-        self._optimized_compute = g_truncate_bound is not None
         self._g_truncate_bound = g_truncate_bound
         self._xi = 1e-150
+
+        self._optimized_kernel_compute = False # currently deprecated
+        self._kernel_window = kernel_window
+    
+
     
     @property
     def chunk_config(self):
@@ -274,12 +279,6 @@ class DiscreteHawkes:
             
             if isinstance(idx, int):
                 raise ValueError('input should be an iterable')
-            
-            if self._optimized_compute:
-                # truncate large g value
-                res_holder = np.ones_like(idx) * self._xi
-                roi_idx_bound = bisect.bisect_right(idx, self._g_truncate_bound)
-                idx = idx[:roi_idx_bound]
                 
             # everything should be wrapped into dask array
             wrapped_query = da.from_array(idx, chunks=(self.chunk_config['occur_lag'], ))
@@ -289,11 +288,8 @@ class DiscreteHawkes:
                 dtype='float64',
                 chunks=(self.chunk_config['occur_lag'], )
             )
-            if self._optimized_compute:
-                res_holder[:roi_idx_bound] = res.compute()
-                return res_holder
-            else:
-                return res.compute() # export numpy result
+
+            return res.compute() # export numpy result
     
         if self.serialize:
             # serialize g_lag query into multiple chunks to prevent OOM
@@ -335,7 +331,7 @@ class DiscreteHawkes:
         # wrap mu, g into callable
         def _lambda(x):
             # x is idx 
-            lambda_res = mu0 * mu[x] + A * g_lag(x) + 1e-8
+            lambda_res = mu0 * mu[x] + A * g_lag(x) + 1e-150
             if truncated:
                 lambda_res[lambda_res >= 1] = self.lambda_bar
             if wrap_into_dask:
@@ -350,7 +346,11 @@ class DiscreteHawkes:
             return background / _lambda(x)
         return _phi, _lambda
     
-    def pairwise_kernel_est(self, num_sample, occurence):
+    def pairwise_kernel_est(self,
+                            num_sample: int,
+                            occurence: np.ndarray,
+                            repeat_mask: np.ndarray=None
+                        ):
         # current impl using Gaussian kernel
 
         # buffer stacked occurence array
@@ -358,9 +358,19 @@ class DiscreteHawkes:
         num_occur = occurence.shape[0]
         def _row_wise_kernel_est(row: np.ndarray):
             # compute elememt-wise gaussian on each row
-            estimate = 1 / (np.sqrt(2*np.pi) * self.bandwidth) * np.exp(
-                -(occurence[None,:]-row[:,None])**2 / (2*self.bandwidth**2)
-            )
+            if self._optimized_kernel_compute:
+                occur_indicator = np.zeros(num_sample)
+                occur_indicator[occurence] = 1
+                estimate = kernel_est_on_window(
+                    row, occur_indicator,
+                    self._kernel_window, self.bandwidth
+                )
+            else:
+                estimate = 1 / (np.sqrt(2*np.pi) * self.bandwidth) * np.exp(
+                    -(occurence[None,:]-row[:,None])**2 / (2*self.bandwidth**2)
+                )
+            if repeat_mask is not None:
+                estimate = estimate * repeat_mask
             return estimate
         
         est = da.map_blocks(
@@ -368,7 +378,8 @@ class DiscreteHawkes:
             wrapped_est,
             chunks=(self.chunk_config['kernel'], num_occur), 
             new_axis=[1],
-            dtype=np.float64)
+            dtype=np.float64
+        )
         return est
  
 
@@ -448,6 +459,8 @@ class DiscreteHawkes:
         ).compute()
 
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
+
+        # get occurence count
         Z_g = self.pairwise_kernel_est(num_sample, occur_lag)
         num_occur = len(occurence)
 

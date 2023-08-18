@@ -5,6 +5,44 @@ from typing import Callable
 # when fitting Hawkes process into jit
 
 @njit(nogil=True)
+def kernel_est_on_window(X: np.ndarray,
+                       Y: np.ndarray,
+                       window_size: int,
+                       bandwidth: int,
+                       eps=1e-100
+                    ):
+    # X/Y: 1-d time-stamp array
+    # hacked trick: zero-pad Y on both side
+    # current impl
+    # -> requires X to be array of time stamps, for example 0,1,2,...[not necessarily consecutive]
+    # -> requires Y to be occurence array of full episode of time
+    #    1 indicates occur, while 0 indicates non-occur
+
+    num_sample = Y.shape[0]
+    radius = int((window_size+1)/2)
+    padder = np.zeros(radius, dtype=X.dtype)
+    zero_padded_occur = np.concatenate((padder, Y, padder), axis=0)
+
+    # select roi for each time stamp
+    l_selected = X[:,None] + radius - np.arange(radius, 0, -1)
+    r_selected = X[:,None] + radius + np.arange(0, radius+1)
+    selected_time_stamp = np.concatenate((l_selected, r_selected), axis=-1)
+
+    roi = np.take(
+        np.concatenate((padder, np.arange(num_sample), padder)),
+        selected_time_stamp
+    )
+    mask = np.take(zero_padded_occur, selected_time_stamp)
+
+    # compute Gaussian Kernel Esimate
+    unmasked_estimate = 1 / (np.sqrt(2*np.pi) * bandwidth) * np.exp(
+            -(X[:,None]-roi)**2 / (2*bandwidth**2)
+    )
+    estimate = np.sum(mask * unmasked_estimate, axis=-1) + eps
+    return estimate 
+
+
+@njit(nogil=True)
 def bundled_g_lag_compute(
     g: np.ndarray,
     X: np.ndarray,

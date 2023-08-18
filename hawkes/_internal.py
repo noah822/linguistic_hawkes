@@ -87,10 +87,16 @@ def indep_2d_roll_da(
     return res
 
 
-def pairwise_difference(X: np.ndarray):
+def pairwise_difference(X: np.ndarray, Y: np.ndarray=None):
     num_sample = len(X)
-    diff = np.repeat(X[None,:], repeats=num_sample, axis=0) - X[:,None]
-    return diff[np.triu_indices(num_sample, k=1)]
+    if Y is None:
+        diff = np.repeat(X[None,:], repeats=num_sample, axis=0) - X[:,None]
+        return diff[np.triu_indices(num_sample, k=1)]
+    else:
+        # X - Y, broadcasted operation
+        diff = X[None,:] - Y[:,None]
+        valid_index = np.where(diff > 0)
+        return diff[valid_index].reshape(-1)
 
 import scipy
 def definite_integral(f: Callable, l: float, r: float):
