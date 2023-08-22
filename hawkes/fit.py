@@ -6,7 +6,9 @@ import os
 import pickle
 from typing import (
     Callable,
-    Tuple
+    Tuple,
+    Dict,
+    Union
 )
 
 import dask.array as da
@@ -21,12 +23,10 @@ from ._internal import (
 from .dist import Gaussian
 from utils.visual import GifConverter
 
-from typing import Dict
-
 
 class DiscreteHawkes:
     def __init__(self,
-                 bandwidth: float,
+                 bandwidth: Union[float, Dict],
                  init_mu0: float=None,
                  init_A: float=None,
                  init_exp_lambda: float=None,
@@ -42,9 +42,12 @@ class DiscreteHawkes:
                  save_as_gif_path: str=None,
                  serialize: bool=False,
                  save_path: str=None):
-        self.bandwidth = bandwidth
-
-        self._radius = int((self.bandwidth-1) / 2)
+    
+        if isinstance(bandwidth, dict):
+            self.x_bandwidth = bandwidth['X']
+            self.lag_bandwidth = bandwidth['lag']
+        else:
+            self.x_bandwidth = self.lag_bandwidth = bandwidth
 
         self.init_mu0, self.init_A = init_mu0, init_A
         self.init_exp_lambda = init_exp_lambda
@@ -167,7 +170,7 @@ class DiscreteHawkes:
         # integrate out kernel estimation for each obversation in the region of interest
         smooth_lambda_normalizer = []
         for i in occurence:
-            kernel_estimator = Gaussian(mu=i, sigma=self.bandwidth)
+            kernel_estimator = Gaussian(mu=i, sigma=self.x_bandwidth)
             smooth_lambda_normalizer.append(
                 definite_integral(kernel_estimator, 0, num_sample-1)
             )
@@ -177,7 +180,7 @@ class DiscreteHawkes:
 
         smooth_lag_normalizer = []
         for delta in occur_lag:
-            kernel_estimator = Gaussian(mu=delta, sigma=self.bandwidth)
+            kernel_estimator = Gaussian(mu=delta, sigma=self.x_bandwidth)
 
             smooth_lag_normalizer.append(1.)
 
@@ -349,6 +352,7 @@ class DiscreteHawkes:
     def pairwise_kernel_est(self,
                             num_sample: int,
                             occurence: np.ndarray,
+                            bandwidth: float,
                             repeat_mask: np.ndarray=None
                         ):
         # current impl using Gaussian kernel
@@ -363,11 +367,11 @@ class DiscreteHawkes:
                 occur_indicator[occurence] = 1
                 estimate = kernel_est_on_window(
                     row, occur_indicator,
-                    self._kernel_window, self.bandwidth
+                    self._kernel_window, bandwidth
                 )
             else:
-                estimate = 1 / (np.sqrt(2*np.pi) * self.bandwidth) * np.exp(
-                    -(occurence[None,:]-row[:,None])**2 / (2*self.bandwidth**2)
+                estimate = 1 / (np.sqrt(2*np.pi) * bandwidth) * np.exp(
+                    -(occurence[None,:]-row[:,None])**2 / (2*bandwidth**2)
                 )
             if repeat_mask is not None:
                 estimate = estimate * repeat_mask
@@ -452,7 +456,7 @@ class DiscreteHawkes:
         # observation on-the-fly
         
         # wrap this into dask framework for better memory usage
-        Z_lambda = self.pairwise_kernel_est(num_sample, occurence)
+        Z_lambda = self.pairwise_kernel_est(num_sample, occurence, self.x_bandwidth)
         updated_mu = da.sum(
             eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
             axis=-1
@@ -461,7 +465,7 @@ class DiscreteHawkes:
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
 
         # get occurence count
-        Z_g = self.pairwise_kernel_est(num_sample, occur_lag)
+        Z_g = self.pairwise_kernel_est(num_sample, occur_lag, self.lag_bandwidth)
         num_occur = len(occurence)
 
         flattened_occur = np.repeat(occurence[None,:], repeats=num_occur, axis=0)[np.triu_indices(num_occur, k=1)]
@@ -473,9 +477,9 @@ class DiscreteHawkes:
         ).compute()
         updated_mu = normalize(updated_mu, divide_by_mean=True)
 
-        # force g(0) = g(1) = 0
 
-        # updated_g[0] = updated_g[1] = 0
+        # force g[0] = 0
+        updated_g[0] = 1e-150
         updated_g = normalize(updated_g)
 
         return updated_mu, updated_g
