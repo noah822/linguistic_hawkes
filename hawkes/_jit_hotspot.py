@@ -98,3 +98,52 @@ def indep_2d_roll(arr, shifts):
 
     result = np.take_along_axis(arr, col_idcs, axis=-1)
     return result
+
+@njit(nogil=True)
+def _gaussian_kernel(x, y, bandwidth):
+    coef = 1 / (np.sqrt(2*np.pi) * bandwidth)
+    estimate = coef * np.exp(
+        -(x-y)**2 / (2*bandwidth**2)
+    )
+    return estimate
+    
+
+
+@njit(nogil=True)
+def pairwise_kernel_est(
+    X: np.ndarray,
+    Y: np.ndarray,
+    bandwidth: float,
+    mirror_boundary: bool=True,
+    l_bound: int=None,
+    r_bound: int=None
+):
+    """
+    X : one-d array of shape (m, )
+    Y : one-d array of shape (n, )
+
+    Return : two-d array of shape (m, n)
+    """
+    m = X.shape[0]; n = Y.shape[0]
+
+    # broadcasted pairwise operation
+    in_region_est = _gaussian_kernel(
+            X[None, :], Y[:,None], bandwidth
+        )
+
+    if mirror_boundary:
+        l_bound = 0 if l_bound is None else l_bound
+        r_bound = m-1 if r_bound is None else r_bound
+
+        cum_est = in_region_est
+        l_mirrored_est = _gaussian_kernel(
+            X[None,:], (2*l_bound - Y)[:,None], bandwidth
+        )
+        r_mirrored_est = _gaussian_kernel(
+            X[None,:], (2*r_bound - Y)[:,None], bandwidth
+        )
+        cum_est = cum_est + l_mirrored_est + r_mirrored_est
+        return cum_est
+    else:
+        # no special compansate operation done in the boundary region
+        return in_region_est

@@ -14,7 +14,11 @@ from typing import (
 import dask.array as da
 
 
-from ._jit_hotspot import bundled_g_lag_compute, kernel_est_on_window
+import _jit_hotspot # bring in this namespace, preventing alias
+from ._jit_hotspot import (
+    bundled_g_lag_compute,
+    kernel_est_on_window,
+)
 from ._internal import (
     normalize,
     pairwise_difference,
@@ -33,6 +37,7 @@ class DiscreteHawkes:
                  eps: float=1e-8,
                  mle_iter_round: int=20,
                  lambda_bar: float=0.999,
+                 mirror_boundary_kde: bool=True,
                  system_profile: Dict=None,
                  chunk_config: Dict=None,
                  use_file_buffer: bool=False,
@@ -57,6 +62,8 @@ class DiscreteHawkes:
 
         assert 0 < lambda_bar < 1
         self.lambda_bar = lambda_bar
+
+        self._mirror_boundary_kde = mirror_boundary_kde
 
         self.mle_iter_round = mle_iter_round
         self.save_path = save_path
@@ -353,7 +360,8 @@ class DiscreteHawkes:
                             num_sample: int,
                             occurence: np.ndarray,
                             bandwidth: float,
-                            repeat_mask: np.ndarray=None
+                            repeat_mask: np.ndarray,
+                            mirror_boundary: bool=True
                         ):
         # current impl using Gaussian kernel
 
@@ -370,8 +378,11 @@ class DiscreteHawkes:
                     self._kernel_window, bandwidth
                 )
             else:
-                estimate = 1 / (np.sqrt(2*np.pi) * bandwidth) * np.exp(
-                    -(occurence[None,:]-row[:,None])**2 / (2*bandwidth**2)
+                estimate = _jit_hotspot.pairwise_kernel_est(
+                    occurence, row,
+                    bandwidth,
+                    mirror_boundary,
+                    0, num_sample-1
                 )
             if repeat_mask is not None:
                 estimate = estimate * repeat_mask
@@ -456,7 +467,11 @@ class DiscreteHawkes:
         # observation on-the-fly
         
         # wrap this into dask framework for better memory usage
-        Z_lambda = self.pairwise_kernel_est(num_sample, occurence, self.x_bandwidth)
+        Z_lambda = self.pairwise_kernel_est(
+            num_sample, occurence,
+            self.x_bandwidth,
+            self._mirror_boundary_kde
+        )
         updated_mu = da.sum(
             eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
             axis=-1
@@ -465,7 +480,11 @@ class DiscreteHawkes:
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
 
         # get occurence count
-        Z_g = self.pairwise_kernel_est(num_sample, occur_lag, self.lag_bandwidth)
+        Z_g = self.pairwise_kernel_est(
+            num_sample, occur_lag,
+            self.lag_bandwidth,
+            self._mirror_boundary_kde
+        )
         num_occur = len(occurence)
 
         flattened_occur = np.repeat(occurence[None,:], repeats=num_occur, axis=0)[np.triu_indices(num_occur, k=1)]
