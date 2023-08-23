@@ -14,7 +14,7 @@ from typing import (
 import dask.array as da
 
 
-import _jit_hotspot # bring in this namespace, preventing alias
+import hawkes._jit_hotspot  as _jit_hotspot# bring in this namespace, preventing alias
 from ._jit_hotspot import (
     bundled_g_lag_compute,
     kernel_est_on_window,
@@ -247,12 +247,19 @@ class DiscreteHawkes:
         
         # save fitted parameters
         if self.save_path is not None:
+            # evaluate lambda
+            _, fitted_lambda_model = self._eval_fn_factory(
+                X, mu0, A, mu_t, g_t, 
+                wrap_into_dask=False
+            )
+            lambda_t = fitted_lambda_model(np.arange(num_sample))
             with open(self.save_path, 'w') as handler:
                 json.dump({
                     'mu0' : mu0,
                     'A' : A,
                     'mu_t' : list(mu_t.astype(np.float64)),
-                    'g_t' : list(g_t.astype(np.float64))
+                    'g_t' : list(g_t.astype(np.float64)),
+                    'lambda_t' : list(lambda_t.astype(np.float64))
                 }, handler)
         
         # save progress as mp4
