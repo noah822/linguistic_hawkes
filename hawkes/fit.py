@@ -367,8 +367,8 @@ class DiscreteHawkes:
                             num_sample: int,
                             occurence: np.ndarray,
                             bandwidth: float,
-                            repeat_mask: np.ndarray,
-                            mirror_boundary: bool=True
+                            mirror_boundary: bool=True,
+                            repeat_mask: np.ndarray=None
                         ):
         # current impl using Gaussian kernel
 
@@ -477,10 +477,13 @@ class DiscreteHawkes:
         Z_lambda = self.pairwise_kernel_est(
             num_sample, occurence,
             self.x_bandwidth,
-            self._mirror_boundary_kde
+            mirror_boundary=self._mirror_boundary_kde
         )
+
+        # current impl depreacates normalizer used to combat boundary effect
+        # use mirrored boundary when computing kde instead
         updated_mu = da.sum(
-            eval_mu(occurence) / eval_lambda(occurence) * Z_lambda / smooth_lambda_normalizer,
+            eval_mu(occurence) / eval_lambda(occurence) * Z_lambda,
             axis=-1
         ).compute()
 
@@ -490,7 +493,7 @@ class DiscreteHawkes:
         Z_g = self.pairwise_kernel_est(
             num_sample, occur_lag,
             self.lag_bandwidth,
-            self._mirror_boundary_kde
+            mirror_boundary=self._mirror_boundary_kde
         )
         num_occur = len(occurence)
 
@@ -498,7 +501,7 @@ class DiscreteHawkes:
         rho_ij = eval_g(occur_lag) / eval_lambda(flattened_occur)  # dask array
 
         updated_g = da.sum(
-            rho_ij * Z_g / smooth_lag_normalizer,
+            rho_ij * Z_g,
             axis=-1
         ).compute()
         updated_mu = normalize(updated_mu, divide_by_mean=True)

@@ -137,11 +137,11 @@ def pairwise_kernel_est(
 
         cum_est = in_region_est
         l_mirrored_est = _gaussian_kernel(
-            X[None,:], (2*l_bound - Y)[:,None], bandwidth
+            (2*l_bound - X)[None,:], Y[:,None], bandwidth
         )
         cum_est += l_mirrored_est
         r_mirrored_est = _gaussian_kernel(
-            X[None,:], (2*r_bound - Y)[:,None], bandwidth
+            (2*r_bound - X)[None,:], Y[:,None], bandwidth
         )
         cum_est += r_mirrored_est
         return cum_est
