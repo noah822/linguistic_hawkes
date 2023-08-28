@@ -23,6 +23,7 @@ from ._internal import (
     normalize,
     pairwise_difference,
     definite_integral,
+    select_window_indices
 )
 from .dist import Gaussian
 from utils.visual import GifConverter
@@ -43,7 +44,7 @@ class DiscreteHawkes:
                  use_file_buffer: bool=False,
                  num_internal_worker: int=None,
                  g_truncate_bound: int=None,
-                 kernel_window: int=None,
+                 kde_num_neighbor: int=None,
                  save_as_gif_path: str=None,
                  serialize: bool=False,
                  save_path: str=None):
@@ -90,8 +91,8 @@ class DiscreteHawkes:
         self._g_truncate_bound = g_truncate_bound
         self._xi = 1e-150
 
-        self._optimized_kernel_compute = False # currently deprecated
-        self._kernel_window = kernel_window
+        self._optimized_kernel_compute = kde_num_neighbor is not None # currently deprecated
+        self._kde_num_neighbor = kde_num_neighbor
     
 
     
@@ -368,32 +369,36 @@ class DiscreteHawkes:
                             occurence: np.ndarray,
                             bandwidth: float,
                             mirror_boundary: bool=True,
-                            repeat_mask: np.ndarray=None
+                            weights: np.ndarray=None,
+                            num_neighbor: int=None
                         ):
         # current impl using Gaussian kernel
 
         # buffer stacked occurence array
         wrapped_est = da.arange(num_sample, chunks=(self.chunk_config['kernel'], ))
         num_occur = occurence.shape[0]
+        
         def _row_wise_kernel_est(row: np.ndarray):
             # compute elememt-wise gaussian on each row
-            if self._optimized_kernel_compute:
-                occur_indicator = np.zeros(num_sample)
-                occur_indicator[occurence] = 1
+            if num_neighbor is not None:
                 estimate = kernel_est_on_window(
-                    row, occur_indicator,
-                    self._kernel_window, bandwidth
+                    occurence, row,
+                    bandwidth,
+                    0, num_sample-1,
+                    num_neighbor,
+                    weights
                 )
             else:
+                # use all avaliable data points
                 estimate = _jit_hotspot.pairwise_kernel_est(
                     occurence, row,
                     bandwidth,
                     mirror_boundary,
                     0, num_sample-1
                 )
-            if repeat_mask is not None:
-                estimate = estimate * repeat_mask
-            return estimate
+                if weights is not None:
+                    estimate = weights * estimate
+            return estimate 
         
         est = da.map_blocks(
             _row_wise_kernel_est,
@@ -474,36 +479,63 @@ class DiscreteHawkes:
         # observation on-the-fly
         
         # wrap this into dask framework for better memory usage
+        bg_factor = (eval_mu(occurence) / eval_lambda(occurence)).compute()
         Z_lambda = self.pairwise_kernel_est(
             num_sample, occurence,
             self.x_bandwidth,
-            mirror_boundary=self._mirror_boundary_kde
+            mirror_boundary=self._mirror_boundary_kde,
+            weights=bg_factor,
+            num_neighbor=self._kde_num_neighbor
         )
 
         # current impl depreacates normalizer used to combat boundary effect
         # use mirrored boundary when computing kde instead
-        updated_mu = da.sum(
-            eval_mu(occurence) / eval_lambda(occurence) * Z_lambda,
-            axis=-1
-        ).compute()
-
+        updated_mu = da.sum(Z_lambda, axis=-1).compute()
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
 
         # get occurence count
-        Z_g = self.pairwise_kernel_est(
-            num_sample, occur_lag,
-            self.lag_bandwidth,
-            mirror_boundary=self._mirror_boundary_kde
-        )
-        num_occur = len(occurence)
+
+        num_occur = occurence.shape[0]
 
         flattened_occur = np.repeat(occurence[None,:], repeats=num_occur, axis=0)[np.triu_indices(num_occur, k=1)]
+        # hack: to guarantee that flattened_occur returns bin count of size num_sample, 
+        # appending dummy occurence with associated weight to be 0
+        extended_flattened_occur = np.concatenate(
+            [flattened_occur, np.arange(num_sample)], axis=0
+        )
+        # wrap flattened_occur into dask
+        wrapped_flattened_occur = da.from_array(extended_flattened_occur, chunks=(self.chunk_config['occur_lag'], ))
         rho_ij = eval_g(occur_lag) / eval_lambda(flattened_occur)  # dask array
 
+        # dask fails to statically infer the output shape of .bincount function
+        # Here, it is legit to compute it out in advance, since rho_ij is of shape (#name_sample, )
+        # For most literature, this value can be fitted in RAM  
+        cum_rho_ij = da.bincount(
+            wrapped_flattened_occur,
+            da.concatenate(
+                rho_ij,
+                da.zeros(num_sample, chunks=(self.chunk_config['occur_lag'], ), dtype=rho_ij.dtype)
+            )
+        ) # cum_rho_ij is of shape (#num_sample, )
+
+        Z_g = self.pairwise_kernel_est(
+            num_sample, np.arange(num_sample),
+            self.lag_bandwidth,
+            mirror_boundary=self._mirror_boundary_kde,
+            num_neighbor=None
+        ) 
+        # To reduce memory usage in distibuted workers, recompute selected indices after computing KDE
+            
+
         updated_g = da.sum(
-            rho_ij * Z_g,
+            cum_rho_ij * Z_g,
             axis=-1
         ).compute()
+
+        #updated_g = da.sum(
+        #    rho_ij * Z_g,
+        #    axis=-1
+        #).compute()
         updated_mu = normalize(updated_mu, divide_by_mean=True)
 
 

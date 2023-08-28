@@ -1,45 +1,78 @@
 from numba import njit
 import numpy as np
-from typing import Callable
+from typing import Callable, Any
 # wrapp frequently executed CPU intensive function 
 # when fitting Hawkes process into jit
 
+
 @njit(nogil=True)
 def kernel_est_on_window(X: np.ndarray,
-                       Y: np.ndarray,
-                       window_size: int,
-                       bandwidth: int,
-                       eps=1e-100
+                        Y: np.ndarray,
+                        bandwidth: int,
+                        l_bound: int=None,
+                        r_bound: int=None,
+                        num_neighbor: int=10,
+                        weights: np.ndarray=None
                     ):
-    # X/Y: 1-d time-stamp array
-    # hacked trick: zero-pad Y on both side
-    # current impl
-    # -> requires X to be array of time stamps, for example 0,1,2,...[not necessarily consecutive]
-    # -> requires Y to be occurence array of full episode of time
-    #    1 indicates occur, while 0 indicates non-occur
+    """
+    Args:
+    - X: (m, ) array of time stamps, for example, 0,1,2,... [not necessarily consecutive]
+    - Y: (n, ) occurence time stamps
+    - l/r_bound: left/right boundary to flip padder of two ends of Y around
+    - num_neighbor: number of adjacent points to consider when estimating, default to 10
+    - bandwidth: bandwidth of Gaussian Kernel, equivalent to std
+    Return:
+    - est: (m, n)
 
-    num_sample = Y.shape[0]
-    radius = int((window_size+1)/2)
-    padder = np.zeros(radius, dtype=X.dtype)
-    zero_padded_occur = np.concatenate((padder, Y, padder), axis=0)
+    Spec:
+    1. When using this optimized kernel estimate function, Y should be a sorted array
+    2. To accomondate boundary cases, this function will extend both sides of array Y by
+    mirroring first/last $num_neighbor points at two ends of the boundary
+    """
+    
+    m = X.shape[0]
+    n = Y.shape[0]
+    assert num_neighbor <= m, 'Number of neighbors to look up exceeds size of array Y'
+    l_bound = 0 if l_bound is None else l_bound
+    r_bound = n - 1 if r_bound is None else r_bound
+
+
+    # take first/last num_neighbor of elements in Y as padder to handle corner cases
+    left_padder = 2*l_bound - X[:num_neighbor]
+    right_padder = 2*r_bound - X[-num_neighbor:]
+
+    extended_X = np.concatenate(
+        (left_padder, X, right_padder), axis=0
+    )
+    # bisect Y using X to find the (approximated) center of roi
+    center_idcs = np.searchsorted(X, Y, side='left')
+
+    # indices of selected points to estimate
+    selected_idcs = np.arange(0, 2*num_neighbor)[None,:] + center_idcs[:,None]
 
     # select roi for each time stamp
-    l_selected = X[:,None] + radius - np.arange(radius, 0, -1)
-    r_selected = X[:,None] + radius + np.arange(0, radius+1)
-    selected_time_stamp = np.concatenate((l_selected, r_selected), axis=-1)
+    roi = np.take(extended_X, selected_idcs)
+    est = _gaussian_kernel(Y[:,None], roi, bandwidth)
 
-    roi = np.take(
-        np.concatenate((padder, np.arange(num_sample), padder)),
-        selected_time_stamp
-    )
-    mask = np.take(zero_padded_occur, selected_time_stamp)
+    if weights is not None:
+        # pad weight array accordingly
+        left_padder = 2*l_bound - weights[:num_neighbor]
+        right_padder = 2*r_bound - weights[-num_neighbor:]
+        extended_w = np.concatenate(
+            (left_padder, weights, right_padder), axis=-1
+        )
+        w_roi = np.take(extended_w, selected_idcs) # no data copy involved
+        est = w_roi * est
 
-    # compute Gaussian Kernel Esimate
-    unmasked_estimate = 1 / (np.sqrt(2*np.pi) * bandwidth) * np.exp(
-            -(X[:,None]-roi)**2 / (2*bandwidth**2)
-    )
-    estimate = np.sum(mask * unmasked_estimate, axis=-1) + eps
-    return estimate 
+    return est
+
+@njit(nogil=True)
+def stack_2d_jit_array(arr: np.ndarray,
+                       repeats: int):
+    return arr.repeat(repeats).reshape(-1, repeats).T
+
+
+
 
 
 @njit(nogil=True)
@@ -148,3 +181,31 @@ def pairwise_kernel_est(
     else:
         # no special compansate operation done in the boundary region
         return in_region_est
+
+@njit(nogil=True)
+def jit_argsort_2d(arr: np.ndarray,
+                   chunk_upper_bound: int,
+                   dtype_max_value: Any=None
+                ):
+    """
+    Args:
+    - arr: 2-d array to be sorted
+    - chunk_upper_bound: numba does not inherently supports argsort on 2d array
+      the work-around adopted is to flatten the input 2-d array into 1d,
+      before a penalty should be added to each row to keep the position of each row in 
+      the flattened array localized.
+      if not specified, the largest value in the input array will be used
+    - dtype_max_value: #row * chunk_upper_bound < dtype_max_value
+      if this value is not provided, safety of operation will not be guaranteed.
+    """
+    if chunk_upper_bound is None:
+        chunk_upper_bound = np.max(arr)
+    num_row, num_col = arr.shape
+    if dtype_max_value is not None:
+        assert num_row * chunk_upper_bound < dtype_max_value, \
+        'Row number of input arr is too large. Dtype overflow will occur. Consider reduce it'
+    
+    penalized_arr = arr + (np.arange(num_row) * chunk_upper_bound)[:,None]
+    flatten_sorted_idcs = penalized_arr.reshape(-1).argsort() 
+    revert_sorted_idcs = flatten_sorted_idcs.reshape(num_row, -1) - (np.arange(num_row) * num_col)[:,None]
+    return revert_sorted_idcs
