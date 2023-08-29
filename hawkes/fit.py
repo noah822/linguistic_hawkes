@@ -23,7 +23,6 @@ from ._internal import (
     normalize,
     pairwise_difference,
     definite_integral,
-    select_window_indices
 )
 from .dist import Gaussian
 from utils.visual import GifConverter
@@ -479,18 +478,20 @@ class DiscreteHawkes:
         # observation on-the-fly
         
         # wrap this into dask framework for better memory usage
-        bg_factor = (eval_mu(occurence) / eval_lambda(occurence)).compute()
+        bg_factor = eval_mu(occurence) / eval_lambda(occurence)
+
+        # currently deprecated weights operation for biased KDE result
         Z_lambda = self.pairwise_kernel_est(
             num_sample, occurence,
             self.x_bandwidth,
             mirror_boundary=self._mirror_boundary_kde,
-            weights=bg_factor,
-            num_neighbor=self._kde_num_neighbor
+            weights=None,
+            num_neighbor=None
         )
 
         # current impl depreacates normalizer used to combat boundary effect
         # use mirrored boundary when computing kde instead
-        updated_mu = da.sum(Z_lambda, axis=-1).compute()
+        updated_mu = da.sum(bg_factor * Z_lambda, axis=-1).compute()
         # index j < i, rho[ij] denotes g(ti-tj) / lambda(ti)
 
         # get occurence count
@@ -500,24 +501,27 @@ class DiscreteHawkes:
         flattened_occur = np.repeat(occurence[None,:], repeats=num_occur, axis=0)[np.triu_indices(num_occur, k=1)]
         # hack: to guarantee that flattened_occur returns bin count of size num_sample, 
         # appending dummy occurence with associated weight to be 0
-        extended_flattened_occur = np.concatenate(
-            [flattened_occur, np.arange(num_sample)], axis=0
+        extended_occur_lag= np.concatenate(
+            [occur_lag, np.arange(num_sample)], axis=0
         )
+
         # wrap flattened_occur into dask
-        wrapped_flattened_occur = da.from_array(extended_flattened_occur, chunks=(self.chunk_config['occur_lag'], ))
-        rho_ij = eval_g(occur_lag) / eval_lambda(flattened_occur)  # dask array
+        wrapped_occur_lag = da.from_array(
+	        extended_occur_lag, chunks=(self.chunk_config['occur_lag'], )
+	    )
+        rho_ij = eval_g(occur_lag) / ( 1e-100 + eval_lambda(flattened_occur) )  # dask array
+        aligned_rho_ij = da.from_array(
+            np.concatenate([rho_ij.compute(), np.ones(num_sample) * 1e-100], axis=0),
+	        chunks=(self.chunk_config['occur_lag'], )
+	    )
 
-        # dask fails to statically infer the output shape of .bincount function
-        # Here, it is legit to compute it out in advance, since rho_ij is of shape (#name_sample, )
-        # For most literature, this value can be fitted in RAM  
+   	    # dask can not infer the shape of return valueof .bincount, 
+	    # in this program, it is legit to compute it out in advance, since rho_ij can be easily fitted into RAM
         cum_rho_ij = da.bincount(
-            wrapped_flattened_occur,
-            da.concatenate(
-                rho_ij,
-                da.zeros(num_sample, chunks=(self.chunk_config['occur_lag'], ), dtype=rho_ij.dtype)
-            )
-        ) # cum_rho_ij is of shape (#num_sample, )
+            wrapped_occur_lag, aligned_rho_ij
+        ).compute() # cum_rho_ij is of shape (#num_sample, )
 
+        cum_rho_ij = da.from_array(cum_rho_ij, chunks=(self.chunk_config['occur_lag'], ))
         Z_g = self.pairwise_kernel_est(
             num_sample, np.arange(num_sample),
             self.lag_bandwidth,

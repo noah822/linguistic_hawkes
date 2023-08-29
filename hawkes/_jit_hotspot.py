@@ -56,8 +56,8 @@ def kernel_est_on_window(X: np.ndarray,
 
     if weights is not None:
         # pad weight array accordingly
-        left_padder = 2*l_bound - weights[:num_neighbor]
-        right_padder = 2*r_bound - weights[-num_neighbor:]
+        left_padder = weights[:num_neighbor]
+        right_padder = weights[-num_neighbor:]
         extended_w = np.concatenate(
             (left_padder, weights, right_padder), axis=-1
         )
