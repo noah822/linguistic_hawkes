@@ -519,9 +519,10 @@ class DiscreteHawkes:
 	    # in this program, it is legit to compute it out in advance, since rho_ij can be easily fitted into RAM
         cum_rho_ij = da.bincount(
             wrapped_occur_lag, aligned_rho_ij
-        ).compute() # cum_rho_ij is of shape (#num_sample, )
+        ) # cum_rho_ij is of shape (#num_sample, )
+        
+        cum_rho_ij.compute_chunk_sizes()
 
-        cum_rho_ij = da.from_array(cum_rho_ij, chunks=(self.chunk_config['occur_lag'], ))
         Z_g = self.pairwise_kernel_est(
             num_sample, np.arange(num_sample),
             self.lag_bandwidth,
