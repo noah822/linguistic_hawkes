@@ -1,6 +1,6 @@
 from numba import njit
 import numpy as np
-from typing import Callable, Any
+from typing import Callable, Any, Union
 # wrapp frequently executed CPU intensive function 
 # when fitting Hawkes process into jit
 
@@ -139,6 +139,14 @@ def _gaussian_kernel(x, y, bandwidth):
         -(x-y)**2 / (2*bandwidth**2)
     )
     return estimate
+
+@njit(nogil=True)
+def _gaussian_kernel_with_bd_array(x, y, bandwidth):
+    coef = 1 / (np.sqrt(2*np.pi) * bandwidth)
+    estimate = coef * np.exp(
+        -(x-y)**2 / (2*bandwidth**2)
+    )
+    return estimate
     
 
 
@@ -181,6 +189,47 @@ def pairwise_kernel_est(
     else:
         # no special compansate operation done in the boundary region
         return in_region_est
+    
+@njit(nogil=True)
+def informed_kernel_est(
+    X: np.ndarray,
+    Y: np.ndarray,
+    bandwidth: np.ndarray,
+    mirror_boundary: bool=True,
+    l_bound: int=None,
+    r_bound: int=None
+):
+    """
+    X : one-d array of shape (m, )
+    Y : one-d array of shape (n, )
+
+    Return : two-d array of shape (m, n)
+    """
+    m = X.shape[0]; n = Y.shape[0]
+
+    # broadcasted pairwise operation
+    in_region_est = _gaussian_kernel_with_bd_array(
+            X[None, :], Y[:,None], bandwidth
+        )
+
+    if mirror_boundary:
+        l_bound = 0 if l_bound is None else l_bound
+        r_bound = m-1 if r_bound is None else r_bound
+
+        cum_est = in_region_est
+        l_mirrored_est = _gaussian_kernel_with_bd_array(
+            (2*l_bound - X)[None,:], Y[:,None], bandwidth
+        )
+        cum_est += l_mirrored_est
+        r_mirrored_est = _gaussian_kernel_with_bd_array(
+            (2*r_bound - X)[None,:], Y[:,None], bandwidth
+        )
+        cum_est += r_mirrored_est
+        return cum_est / bandwidth
+    else:
+        # no special compansate operation done in the boundary region
+        return in_region_est / bandwidth
+
 
 @njit(nogil=True)
 def jit_argsort_2d(arr: np.ndarray,
@@ -209,3 +258,47 @@ def jit_argsort_2d(arr: np.ndarray,
     flatten_sorted_idcs = penalized_arr.reshape(-1).argsort() 
     revert_sorted_idcs = flatten_sorted_idcs.reshape(num_row, -1) - (np.arange(num_row) * num_col)[:,None]
     return revert_sorted_idcs
+
+
+# @njit(nogil=True)
+
+def customize_bandwidth(arr: np.ndarray,
+                        neighor_of_insterest: int) -> np.ndarray:
+    
+    num_sample = arr.shape[0]
+    dummy_stub = neighor_of_insterest + 1
+    left_padder, right_padder = np.flip(arr.copy()), np.flip(arr.copy())
+    left_padder[0] = dummy_stub; right_padder[-1] = dummy_stub
+
+    extended_arr = np.concatenate(
+        (left_padder, arr, right_padder), axis=0
+    )
+    cum = np.cumsum(extended_arr)
+
+    res_holder = np.ones_like(arr)
+    for i in range(num_sample):
+        res_holder[i] = _bisect_min_radius(
+            cum, num_sample + i, neighor_of_insterest
+        )
+    return res_holder
+
+# @njit(nogil=True)
+
+def _bisect_min_radius(arr: np.ndarray,
+                       center: int,
+                       bound: int,
+                       start_value: int=None) -> int:
+    # input arr should be guaranteed to be solvable
+
+    if start_value is None:
+        start_value = min(center-1, arr.shape[0]-1-center)
+
+    prev_radius = cur_radius = start_value
+    while cur_radius > 1:
+        prev_radius = cur_radius
+        cur_radius = int((1+prev_radius) / 2)
+        sum_in_roi = arr[center+cur_radius] - arr[center-cur_radius-1]
+        if sum_in_roi < bound:
+            return prev_radius
+        
+    return cur_radius

@@ -18,6 +18,7 @@ import hawkes._jit_hotspot  as _jit_hotspot# bring in this namespace, preventing
 from ._jit_hotspot import (
     bundled_g_lag_compute,
     kernel_est_on_window,
+    customize_bandwidth
 )
 from ._internal import (
     normalize,
@@ -44,6 +45,7 @@ class DiscreteHawkes:
                  num_internal_worker: int=None,
                  g_truncate_bound: int=None,
                  kde_num_neighbor: int=None,
+                 kde_neighbor_of_insterest: int=None,
                  save_as_gif_path: str=None,
                  serialize: bool=False,
                  save_path: str=None):
@@ -92,6 +94,10 @@ class DiscreteHawkes:
 
         self._optimized_kernel_compute = kde_num_neighbor is not None # currently deprecated
         self._kde_num_neighbor = kde_num_neighbor
+
+        self._neighbor_of_insterest = kde_neighbor_of_insterest
+        self._varying_bd_for_lag = None
+        self._use_varying_bd_for_lag = kde_neighbor_of_insterest is not None
     
 
     
@@ -173,6 +179,19 @@ class DiscreteHawkes:
         occurence = np.argwhere(X == 1).reshape(-1)
 
         occur_lag = pairwise_difference(occurence)
+        if self._neighbor_of_insterest is not None:
+            lag_hist = np.bincount(
+                np.concatenate([occur_lag, np.arange(num_sample)]),
+                weights=np.concatenate(
+                    [np.ones_like(occur_lag), np.zeros(num_sample, )]
+                )
+            )
+            self._varying_bd_for_lag = customize_bandwidth(
+                lag_hist, self._neighbor_of_insterest
+            ).astype(np.float64)
+            if verbose:
+                print('Finish computing for varying bandwidth for lag KDE')
+                print(f'The number of neighbors in insterest if {self._neighbor_of_insterest}')
 
         # integrate out kernel estimation for each obversation in the region of interest
         smooth_lambda_normalizer = []
@@ -366,9 +385,10 @@ class DiscreteHawkes:
     def pairwise_kernel_est(self,
                             num_sample: int,
                             occurence: np.ndarray,
-                            bandwidth: float,
+                            bandwidth: Union[float, np.ndarray]=None,
                             mirror_boundary: bool=True,
                             weights: np.ndarray=None,
+                            varying_bd: bool=False,
                             num_neighbor: int=None
                         ):
         # current impl using Gaussian kernel
@@ -376,6 +396,9 @@ class DiscreteHawkes:
         # buffer stacked occurence array
         wrapped_est = da.arange(num_sample, chunks=(self.chunk_config['kernel'], ))
         num_occur = occurence.shape[0]
+        if varying_bd:
+            assert isinstance(bandwidth, np.ndarray)
+            
         
         def _row_wise_kernel_est(row: np.ndarray):
             # compute elememt-wise gaussian on each row
@@ -389,12 +412,20 @@ class DiscreteHawkes:
                 )
             else:
                 # use all avaliable data points
-                estimate = _jit_hotspot.pairwise_kernel_est(
-                    occurence, row,
-                    bandwidth,
-                    mirror_boundary,
-                    0, num_sample-1
-                )
+                if not varying_bd:
+                    estimate = _jit_hotspot.pairwise_kernel_est(
+                        occurence, row,
+                        bandwidth,
+                        mirror_boundary,
+                        0, num_sample-1
+                    )
+                else: # use varying bandwidth
+                    estimate = _jit_hotspot.informed_kernel_est(
+                        occurence, row, 
+                        self._varying_bd_for_lag, 
+                        mirror_boundary,
+                        0, num_sample-1
+                    )
                 if weights is not None:
                     estimate = weights * estimate
             return estimate 
@@ -525,8 +556,9 @@ class DiscreteHawkes:
 
         Z_g = self.pairwise_kernel_est(
             num_sample, np.arange(num_sample),
-            self.lag_bandwidth,
+            self._varying_bd_for_lag,
             mirror_boundary=self._mirror_boundary_kde,
+            varying_bd=self._use_varying_bd_for_lag,
             num_neighbor=None
         ) 
         # To reduce memory usage in distibuted workers, recompute selected indices after computing KDE

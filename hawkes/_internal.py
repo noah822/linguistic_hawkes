@@ -6,6 +6,18 @@ from typing import (
     Union
 )
 import dask.array as da
+import numpy as np
+
+
+def select_window_indices(X: np.ndarray,
+                          Y: np.ndarray,
+                          window_size: int):
+    # query X using Y
+    center_idcs = np.searchsorted(X, Y, side='left')
+    selected_idcs = np.arange(0, 2*window_size+1)[None:,] + center_idcs[:,None]
+    return selected_idcs
+    
+
 
 def two_way_bisect(X: List,
                    center: int,
