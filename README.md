@@ -47,7 +47,11 @@ $ python main.py --word --corpus-path --total-word-num \
     * __epoch__: the number of fitting epoch
 
 #### Workflow
-Conditional intensity function adopted for uni-variant case in this repo is
+Conditional intensity function $\lambda(t)$ is defined as 
+$$
+\lambda(t) = P\{X_t = 1 |\mathcal{H}_t\}
+$$
+In our example, we estimate $\lambda(t)$ for uni-variant case with the following equation
 $$
  \lambda(t) = \mu_0 \mu(t) + A \sum_{i: t_i < t} g(t-t_i)
 $$
