@@ -47,10 +47,14 @@ $ python main.py --word --corpus-path --total-word-num \
     * __epoch__: the number of fitting epoch
 
 #### Workflow
-Conditional intensity function $\lambda(t)$ is defined as 
-$$\lambda(t) = P\{X_t = 1 |\mathcal{H}_t\}$$
+Conditional intensity function $\lambda(t)$ is defined as, which is the probability of occurrence of event at time stamp $t$ conditioned previous history
+```math
+\lambda(t) = P\{X_t = 1 |\mathcal{H}_t\}
+```
 In our example, we estimate $\lambda(t)$ for uni-variant case with the following equation
-$$\lambda(t) = \mu_0 \mu(t) + A \sum_{i: t_i < t} g(t-t_i)$$
+```math
+\lambda(t) = \mu_0 \mu(t) + A \sum_{i: t_i < t} g(t-t_i)
+```
 The objective likelihood function is 
 $$\mathcal{L} = \sum_{i=1}^{N} log\[\lambda(t)\](X_i) + log\[1-\lambda(t)\](1-X_i)$$
 where $X_i$ is an indicator variable for occurrence, $X_i=1$ denotes occurrence, $X_i=0$ denotes no occurrence.
