@@ -48,47 +48,38 @@ $ python main.py --word --corpus-path --total-word-num \
 
 #### Workflow
 Conditional intensity function $\lambda(t)$ is defined as 
-$$
-\lambda(t) = P\{X_t = 1 |\mathcal{H}_t\}
-$$
+$$\lambda(t) = P\{X_t = 1 |\mathcal{H}_t\}$$
 In our example, we estimate $\lambda(t)$ for uni-variant case with the following equation
-$$
- \lambda(t) = \mu_0 \mu(t) + A \sum_{i: t_i < t} g(t-t_i)
-$$
+$$\lambda(t) = \mu_0 \mu(t) + A \sum_{i: t_i < t} g(t-t_i)$$
 The objective likelihood function is 
-$$
-    \mathcal{L} = \sum_{i=1}^{N} log[\lambda(t)](X_i) + log[1-\lambda(t)](1-X_i)
-$$
-where $X_i = \begin{cases} 1 \quad \text{occurr} \\ 0 \quad \text{no occur} \end{cases}$ is an indicator variable for occurrence.
+$$\mathcal{L} = \sum_{i=1}^{N} log\[\lambda(t)\](X_i) + log\[1-\lambda(t)\](1-X_i)$$
+where $X_i$ is an indicator variable for occurrence, $X_i=1$ denotes occurrence, $X_i=0$ denotes no occurrence.
 
 Denote $\phi(t) = \frac{\mu(t)}{\lambda(t)}$ and $\rho_{ij}=\frac{g(t_j-t_i)}{\lambda(t_j)}$  
 
 **E step: Update $\mu(t)$ and $g(t)$**
-$$
-    \mu(t) \leftarrow \sum_{t_i \in N} \phi(t_i) \mathbb{1}[t \in [t-\Delta t, t+\Delta t]] \approx \sum_{t_i \in N} \phi(t_i) Z(t-t_i, \omega_{bg})
-$$
 
-$$
-g(t) \leftarrow \sum_{t_i, t_j \in N; t_i<t_j} \rho_{ij} \mathbb{1}[t_j-t_i \in [t-\Delta t, t+\Delta t]] \approx \sum_{t_i, t_j \in N; t_i<t_j} \rho_{ij} Z(t_j-t_i, \omega_{trigger})
-$$
+```math
+\mu(t) \leftarrow \sum_{t_i \in N} \phi(t_i) \mathbb{1}[t \in [t-\Delta t, t+\Delta t]] \approx \sum_{t_i \in N} \phi(t_i) Z(t-t_i, \omega_{bg})
+```
+
+```math
+g(t) \leftarrow \sum_{t_i, t_j \in N; t_i < t_j} \rho_{ij} \mathbb{1}[t_j-t_i \in [t-\Delta t, t+\Delta t]] \approx \sum_{t_i, t_j \in N; t_i < t_j} \rho_{ij} Z(t_j-t_i, \omega_{trigger})
+```
+
+
+
+
 
 **M step: Update $\mu_0$ and $A$**
-$$
-\frac{\partial \mathcal{L}}{\partial \mu_0} = \sum_{t_i \in N} \frac{\phi(t_i)}{\mu_0} - \sum_{t \notin N} \frac{\mu(t)}{1-\lambda(t)} 
-$$
-$$
-\frac{\partial \mathcal{L}}{\partial A} = \sum_{t_i \in N} \frac{1-\phi(t_i)}{A} - \sum_{t \notin N} \frac{\sum_{j:t_j<t} g(t-t_j)}{1-\lambda(t)} 
-$$
+$$\frac{\partial \mathcal{L}}{\partial \mu_0} = \sum_{t_i \in N} \frac{\phi(t_i)}{\mu_0} - \sum_{t \notin N} \frac{\mu(t)}{1-\lambda(t)}$$
+$$\frac{\partial \mathcal{L}}{\partial A} = \sum_{t_i \in N} \frac{1-\phi(t_i)}{A} - \sum_{t \notin N} \frac{\sum_{j: t_j < t} g(t-t_j)}{1-\lambda(t)} $$
 Iterative Optimization Approach
-$$
-\mu_0^{k+1} \leftarrow \frac{\sum_{t_i \in N}\phi^k(t_i)}
-{\sum_{t \notin N} \frac{\mu^k(t)}{1-\lambda^k(t)}}
-$$
-$$
-A^{k+1} \leftarrow \frac{\sum_{t_i \in N} 1-\phi^{k+1}(t_i)}{\sum_{t \notin N}
+$$\mu_0^{k+1} \leftarrow \frac{\sum_{t_i \in N}\phi^k(t_i)}
+{\sum_{t \notin N} \frac{\mu^k(t)}{1-\lambda^k(t)}}$$
+$$A^{k+1} \leftarrow \frac{\sum_{t_i \in N} 1-\phi^{k+1}(t_i)}{\sum_{t \notin N}
 \frac{\sum_{t_j:t_j < t} g^{k+1}(t-t_j)}{1 - \lambda^{k+1}(t)}
-}
-$$
+}$$
 
 
 
